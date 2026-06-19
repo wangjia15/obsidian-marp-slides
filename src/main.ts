@@ -249,6 +249,28 @@ export class MarpSlidesSettingTab extends PluginSettingTab {
 					this.plugin.settings.EnableMarkdownItPlugins = value;
 					await this.plugin.saveSettings();
 				}));
+
+		new Setting(containerEl)
+			.setName('Mermaid Default Width')
+			.setDesc('Default max-width for Mermaid diagrams (e.g. 80%, 700px). Leave empty for no constraint. Per-diagram: use ```mermaid {width=700px} in your Markdown.')
+			.addText(text => text
+				.setPlaceholder('e.g. 80% or 700px')
+				.setValue(this.plugin.settings.MermaidWidth)
+				.onChange(async (value) => {
+					this.plugin.settings.MermaidWidth = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Mermaid Default Height')
+			.setDesc('Default max-height for Mermaid diagrams (e.g. 60%, 400px). Leave empty for no constraint. Per-diagram: use ```mermaid {height=400px} in your Markdown.')
+			.addText(text => text
+				.setPlaceholder('e.g. 60% or 400px')
+				.setValue(this.plugin.settings.MermaidHeight)
+				.onChange(async (value) => {
+					this.plugin.settings.MermaidHeight = value;
+					await this.plugin.saveSettings();
+				}));
 	}
 }
 
