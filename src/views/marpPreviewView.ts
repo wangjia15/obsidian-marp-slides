@@ -1,11 +1,73 @@
 import { ItemView, WorkspaceLeaf, MarkdownView, normalizePath, TFile } from 'obsidian';
 import { Marp } from '@marp-team/marp-core'
 import { browser, type MarpCoreBrowser } from '@marp-team/marp-core/browser'
+import { deflateSync } from 'zlib';
 
 import { MarpSlidesSettings } from '../utilities/settings'
 import { MarpExport } from '../utilities/marpExport';
 import { FilePath } from '../utilities/filePath'
 import { MathOptions } from '@marp-team/marp-core/types/src/math/math';
+
+interface MermaidDimension {
+    width?: string;
+    height?: string;
+}
+
+function parseMermaidDimensions(markdown: string): {
+    processedMarkdown: string;
+    dimensionMap: Map<string, MermaidDimension>;
+} {
+    const dimensionMap = new Map<string, MermaidDimension>();
+    const fenceRegex = /^```mermaid\s*\{([^}]*)\}\n([\s\S]*?)^```/gm;
+
+    const processedMarkdown = markdown.replace(fenceRegex, (_match, attrs: string, code: string) => {
+        const widthMatch = attrs.match(/width\s*=\s*([^\s}]+)/);
+        const heightMatch = attrs.match(/height\s*=\s*([^\s}]+)/);
+
+        if (widthMatch || heightMatch) {
+            const encoded = deflateSync(code, { level: 9 }).toString('base64url');
+            const dim: MermaidDimension = {};
+            if (widthMatch) dim.width = widthMatch[1];
+            if (heightMatch) dim.height = heightMatch[1];
+            dimensionMap.set(encoded, dim);
+        }
+
+        return `\`\`\`mermaid\n${code}\`\`\``;
+    });
+
+    return { processedMarkdown, dimensionMap };
+}
+
+function applyMermaidStyling(
+    html: string,
+    css: string,
+    dimensionMap: Map<string, MermaidDimension>,
+    globalWidth: string,
+    globalHeight: string
+): { html: string; css: string } {
+    if (dimensionMap.size > 0) {
+        html = html.replace(
+            /<embed(\s[^>]*?)?src="https:\/\/kroki\.io\/mermaid\/svg\/([^"]+)"/g,
+            (match, before: string, encoded: string) => {
+                const dim = dimensionMap.get(encoded);
+                if (!dim) return match;
+                const styles: string[] = [];
+                if (dim.width) styles.push(`width:${dim.width}`);
+                if (dim.height) styles.push(`height:${dim.height}`);
+                return `<embed${before || ' '}style="${styles.join(';')}" src="https://kroki.io/mermaid/svg/${encoded}"`;
+            }
+        );
+    }
+
+    const globalStyles: string[] = [];
+    if (globalWidth) globalStyles.push(`max-width:${globalWidth}`);
+    if (globalHeight) globalStyles.push(`max-height:${globalHeight}`);
+    if (globalStyles.length > 0) {
+        css += `\np.kroki-image-container embed,p.kroki-image-container img{${globalStyles.join(';')}}`;
+    }
+
+    return { html, css };
+}
 
 const markdownItContainer = require('markdown-it-container');
 const markdownItMark = require('markdown-it-mark');
@@ -142,8 +204,9 @@ export class MarpPreviewView extends ItemView  {
             const container = this.containerEl.children[1];
             container.empty();
 
-
-            let { html, css } = this.marp.render(processedMarkdown);
+            const { processedMarkdown: mdSized, dimensionMap } = parseMermaidDimensions(processedMarkdown);
+            let { html, css } = this.marp.render(mdSized);
+            ({ html, css } = applyMermaidStyling(html, css, dimensionMap, this.settings.MermaidWidth, this.settings.MermaidHeight));
             
             // Replace Backgorund Url for images
             html = html.replace(/(?!background-image:url\(&quot;http)background-image:url\(&quot;/g, `background-image:url(&quot;${basePath}`);
