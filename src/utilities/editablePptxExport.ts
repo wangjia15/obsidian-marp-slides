@@ -8,10 +8,9 @@ import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
 import { tryAcquireExportLock, releaseExportLock } from './exportLock';
 import { createMarpInstance } from './marpInstance';
-import { parseMermaidDimensions, applyMermaidStyling } from '../views/marpPreviewView';
+import { parseMermaidDimensions, applyMermaidStyling } from './mermaid';
+import { rgbToHex, isTransparent, pxToIn, pxToPt } from './units';
 import { MarpCLIError } from './marpExport';
-
-const PX_PER_INCH = 96;
 
 interface SlideTextItem {
     type: 'text';
@@ -76,28 +75,6 @@ function resolveChromePath(settings: MarpSlidesSettings): string {
     throw new MarpCLIError(
         'Could not find an installed Chrome/Edge/Chromium browser. Set the Chrome executable path in Marp Slides settings.'
     );
-}
-
-function rgbToHex(rgb: string): string {
-    const m = rgb.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-    if (!m) return '000000';
-    return [m[1], m[2], m[3]]
-        .map((v) => Number(v).toString(16).padStart(2, '0'))
-        .join('')
-        .toUpperCase();
-}
-
-function isTransparent(rgb: string): boolean {
-    const m = rgb.match(/rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([\d.]+)\)/);
-    return rgb === 'transparent' || (!!m && parseFloat(m[1]) === 0);
-}
-
-function pxToIn(px: number): number {
-    return px / PX_PER_INCH;
-}
-
-function pxToPt(px: number): number {
-    return px * 0.75;
 }
 
 // Walks each rendered slide's DOM inside the page and extracts a layout tree of

@@ -5,23 +5,12 @@ import { join } from 'path';
 import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
 import { tryAcquireExportLock, releaseExportLock } from './exportLock';
+import { extractMermaidDiagrams } from './mermaid';
 import { writeFileSync, readFileSync } from 'fs-extra';
 
 const { generateUrl } = require('@kazumatu981/markdown-it-kroki/lib/diagram-encoder');
 
 export class MarpCLIError extends Error {}
-
-function extractMermaidDiagrams(markdown: string): string[] {
-    const fenceRegex = /^```mermaid[^\n]*\n([\s\S]*?)^```/gm;
-    const diagrams: string[] = [];
-    let match: RegExpExecArray | null;
-
-    while ((match = fenceRegex.exec(markdown)) !== null) {
-        diagrams.push(match[1]);
-    }
-
-    return diagrams;
-}
 
 // kroki.io renders on demand and caches by content hash; a diagram it hasn't seen
 // before can take well beyond marp-cli's fixed ~30s Puppeteer timeout to render,
