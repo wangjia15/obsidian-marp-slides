@@ -1,10 +1,51 @@
 import marpCli, { CLIError, CLIErrorCode } from '@marp-team/marp-cli'
 import { TFile, App, Notice } from 'obsidian';
+import { request as httpsRequest } from 'https';
 import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
 import { writeFileSync, readFileSync } from 'fs-extra';
 
+const { generateUrl } = require('@kazumatu981/markdown-it-kroki/lib/diagram-encoder');
+
 export class MarpCLIError extends Error {}
+
+function extractMermaidDiagrams(markdown: string): string[] {
+    const fenceRegex = /^```mermaid[^\n]*\n([\s\S]*?)^```/gm;
+    const diagrams: string[] = [];
+    let match: RegExpExecArray | null;
+
+    while ((match = fenceRegex.exec(markdown)) !== null) {
+        diagrams.push(match[1]);
+    }
+
+    return diagrams;
+}
+
+// kroki.io renders on demand and caches by content hash; a diagram it hasn't seen
+// before can take well beyond marp-cli's fixed ~30s Puppeteer timeout to render,
+// silently dropping it from the export. Hitting the same URL ourselves first
+// (with a much longer timeout) warms kroki's cache so Puppeteer's later request
+// for the identical URL resolves near-instantly.
+function prewarmKrokiUrl(url: string, timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+        const req = httpsRequest(url, { timeout: timeoutMs }, (res) => {
+            res.on('data', () => { /* drain, content is discarded */ });
+            res.on('end', () => resolve());
+            res.on('error', () => resolve());
+        });
+        req.on('timeout', () => { req.destroy(); resolve(); });
+        req.on('error', () => resolve());
+        req.end();
+    });
+}
+
+async function prewarmMermaidDiagrams(markdown: string): Promise<void> {
+    const diagrams = extractMermaidDiagrams(markdown);
+    if (diagrams.length === 0) return;
+
+    const urls = diagrams.map((code) => generateUrl('https://kroki.io', 'mermaid', 'svg', code));
+    await Promise.all(urls.map((url) => prewarmKrokiUrl(url, 45000)));
+}
 
 export class MarpExport {
 
@@ -106,8 +147,17 @@ export class MarpExport {
                     
                     //argv.push('--watch');
             }
+
+            if (this.settings.EnableMarkdownItPlugins) {
+                try {
+                    await prewarmMermaidDiagrams(readFileSync(completeFilePath, 'utf-8'));
+                } catch (e) {
+                    console.warn('Failed to prewarm Mermaid diagrams before export.', e);
+                }
+            }
+
             await this.run(argv, resourcesPath);
-        } 
+        }
 
     }
 
