@@ -89,6 +89,7 @@ export class MarpPreviewView extends ItemView  {
     private settings : MarpSlidesSettings;
 
     private file : TFile;
+    private lastRenderedKey = '';
 
     constructor(settings: MarpSlidesSettings, leaf: WorkspaceLeaf) {
         super(leaf);
@@ -110,6 +111,7 @@ export class MarpPreviewView extends ItemView  {
 
         const container = this.containerEl.children[1];
         container.empty();
+        this.lastRenderedKey = '';
         this.marpBrowser = browser(container);
 
         if (this.settings.ThemePath != '') {        
@@ -137,11 +139,11 @@ export class MarpPreviewView extends ItemView  {
     }
 
     async onLineChanged(line: number) {
-        try {
-		    this.containerEl.children[1].children[2].children[line].scrollIntoView();
-        } catch {
-            console.log("Preview slide not found!")
+        const slides = this.containerEl.querySelectorAll('[data-marp-vscode-slide-wrapper]');
+        if (slides.length === 0) {
+            return;
         }
+        slides[Math.max(0, Math.min(line, slides.length - 1))].scrollIntoView();
 	}
 
     async addActions() {
@@ -193,6 +195,13 @@ export class MarpPreviewView extends ItemView  {
             const basePath = filePath.getCompleteFileBasePath(view.file);
             const markdownText = view.data;
 
+            // Re-rendering is expensive (full Marp render + innerHTML swap); skip when
+            // nothing that affects the output has changed.
+            const renderKey = `${basePath}|${this.settings.MermaidWidth}|${this.settings.MermaidHeight}|${markdownText}`;
+            if (renderKey === this.lastRenderedKey) {
+                return;
+            }
+
             // Convert wiki-link images to standard markdown
             const processedMarkdown = filePath.convertImageWikiLinks(markdownText, view.file, this.app);
 
@@ -219,6 +228,7 @@ export class MarpPreviewView extends ItemView  {
 
             container.innerHTML = htmlFile;
             this.marpBrowser?.update();
+            this.lastRenderedKey = renderKey;
         }
         else
         {

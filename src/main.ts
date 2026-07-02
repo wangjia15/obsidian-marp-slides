@@ -1,4 +1,4 @@
-import { MarkdownView, TAbstractFile, Plugin, addIcon, App, PluginSettingTab, Setting, EditorSuggest, EditorPosition, Editor, TFile, EditorSuggestTriggerInfo, EditorSuggestContext  } from 'obsidian';
+import { MarkdownView, TAbstractFile, Plugin, addIcon, App, PluginSettingTab, Setting, EditorSuggest, EditorPosition, Editor, TFile, EditorSuggestTriggerInfo, EditorSuggestContext, debounce  } from 'obsidian';
 
 import { MARP_PREVIEW_VIEW, MarpPreviewView } from './views/marpPreviewView';
 import { MarpExport } from './utilities/marpExport';
@@ -86,7 +86,8 @@ export default class MarpSlides extends Plugin {
 		if (this.settings.EnableSyncPreview)
 			this.registerEditorSuggest(new LineSelectionListener(this.app, this));
 
-		this.registerEvent(this.app.vault.on('modify', this.onChange.bind(this)));
+		// Debounce so rapid typing triggers one preview re-render, not one per change event.
+		this.registerEvent(this.app.vault.on('modify', debounce(this.onChange.bind(this), 400, true)));
 	}
 
 	async loadSettings() {
@@ -290,6 +291,8 @@ export class MarpSlidesSettingTab extends PluginSettingTab {
 
 class LineSelectionListener extends EditorSuggest<string> {
 	private plugin: MarpSlides;
+	private lastFilePath = '';
+	private lastLine = -1;
 
 	constructor(app: App, plugin: MarpSlides) {
 		super(app);
@@ -297,35 +300,45 @@ class LineSelectionListener extends EditorSuggest<string> {
 	}
 
 	onTrigger(cursor: EditorPosition, editor: Editor, file: TFile): EditorSuggestTriggerInfo | null {
-		//console.log("line: " + cursor.line);
-		//console.log("ch: " + cursor.ch);
-		//console.log("value: " + editor.getValue());
-        
-        let triggerInfo: EditorSuggestTriggerInfo = {start:cursor, end:cursor, query:""};
-        const instance = this.plugin.getViewInstance();
+		if (file.path === this.lastFilePath && cursor.line === this.lastLine) {
+			return null;
+		}
+		this.lastFilePath = file.path;
+		this.lastLine = cursor.line;
 
+		const instance = this.plugin.findViewInstance();
 		if (instance) {
-			const lines = editor.getValue().split('\n');
-			const firstNLines = lines.slice(0, cursor.line);
-			const text = firstNLines.join('\n');
-			
-			const regex = new RegExp('---', 'g');
-			let matches = text.match(regex);
-			let slide = matches ? matches.length : 0;
-			var matter = require('gray-matter');
-			const frontMatter = matter(text);
-			if (frontMatter.data !== null && Object.keys(frontMatter.data).length > 0) {
-				instance.onLineChanged(slide - 2);
-			} else {
-				instance.onLineChanged(slide);
-			}			
+			instance.onLineChanged(this.getSlideIndex(cursor, editor, file));
 		}
 		return null;
 	}
+
+	// Slide index = number of `---` rulers above the cursor, ignoring the YAML
+	// frontmatter delimiters and any rulers inside fenced code blocks.
+	private getSlideIndex(cursor: EditorPosition, editor: Editor, file: TFile): number {
+		let startLine = 0;
+		const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatterPosition;
+		if (frontmatter) {
+			startLine = frontmatter.end.line + 1;
+		}
+
+		let slide = 0;
+		let inFence = false;
+		for (let i = startLine; i < cursor.line; i++) {
+			const line = editor.getLine(i).trimEnd();
+			if (/^(```|~~~)/.test(line)) {
+				inFence = !inFence;
+				continue;
+			}
+			if (!inFence && /^-{3,}$/.test(line)) {
+				slide++;
+			}
+		}
+		return slide;
+	}
+
 	getSuggestions(context: EditorSuggestContext): string[] | Promise<string[]> {
-		let suggestion :string[] = [];
-		return suggestion;
-		//throw new Error('Method not implemented.');
+		return [];
 	}
 	renderSuggestion(value: string, el: HTMLElement): void {
 		throw new Error('Method not implemented.');
