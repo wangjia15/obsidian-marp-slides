@@ -2,6 +2,7 @@ import { MarkdownView, TAbstractFile, Plugin, addIcon, App, PluginSettingTab, Se
 
 import { MARP_PREVIEW_VIEW, MarpPreviewView } from './views/marpPreviewView';
 import { MarpExport } from './utilities/marpExport';
+import { EditablePptxExport } from './utilities/editablePptxExport';
 import { ICON_SLIDE_PREVIEW, ICON_EXPORT_PDF, ICON_EXPORT_PPTX, ICON_SLIDE_PRESENT } from './utilities/icons';
 import { Libs } from './utilities/libs';
 import { MarpSlidesSettings, DEFAULT_SETTINGS } from 'utilities/settings';
@@ -66,7 +67,13 @@ export default class MarpSlides extends Plugin {
 			id: 'export-png',
 			name: 'Export PNG',
 			callback: (() => this.exportFile('png'))
-		});		
+		});
+
+		this.addCommand({
+			id: 'export-pptx-editable',
+			name: 'Export Editable PPTX (text is editable, diagrams stay as images)',
+			callback: (() => this.exportEditablePptx())
+		});
 
 		// this.addCommand({
 		// 	id: 'export-deck',
@@ -106,6 +113,14 @@ export default class MarpSlides extends Plugin {
 		if(file !== null){
 			const marpCli = new MarpExport(this.settings, this.app);
 			await marpCli.export(file,type);
+		}
+	}
+
+	async exportEditablePptx(){
+		const file = this.app.workspace.getActiveFile();
+		if(file !== null){
+			const editablePptxExport = new EditablePptxExport(this.settings, this.app);
+			await editablePptxExport.export(file);
 		}
 	}
 

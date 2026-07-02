@@ -1,5 +1,5 @@
 import marpCli, { CLIError, CLIErrorCode } from '@marp-team/marp-cli'
-import { TFile, App } from 'obsidian';
+import { TFile, App, Notice } from 'obsidian';
 import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
 import { writeFileSync, readFileSync } from 'fs-extra';
@@ -112,14 +112,37 @@ export class MarpExport {
     }
 
     //async exportPdf(argv: string[], opts?: MarpCLIAPIOptions | undefined){
+    // Export depends on kroki.io to render Mermaid/PlantUML diagrams, and marp-cli
+    // launches a fresh Puppeteer browser for every export. That first network round-trip
+    // is occasionally very slow (observed 60s+ against a ~30s internal timeout), which
+    // silently produces a slide deck missing its diagrams. A single retry is cheap and,
+    // per observed behaviour, near-always succeeds fast on the second attempt.
+    private static readonly MAX_ATTEMPTS = 2;
+
     private async run(argv: string[], resourcesPath: string){
         const { CHROME_PATH } = process.env;
 
         try {
             process.env.CHROME_PATH = this.settings.CHROME_PATH || CHROME_PATH;
 
-            this.runMarpCli(argv, resourcesPath);
-            
+            let lastError: unknown;
+
+            for (let attempt = 1; attempt <= MarpExport.MAX_ATTEMPTS; attempt++) {
+                try {
+                    await this.runMarpCli(argv, resourcesPath);
+                    return;
+                } catch (e) {
+                    lastError = e;
+
+                    if (e instanceof CLIError && e.errorCode === CLIErrorCode.NOT_FOUND_CHROMIUM) {
+                        break;
+                    }
+
+                    console.warn(`Marp CLI export attempt ${attempt}/${MarpExport.MAX_ATTEMPTS} failed.`, e);
+                }
+            }
+
+            throw lastError;
         } catch (e) {
             console.error(e)
 
@@ -134,12 +157,16 @@ export class MarpExport {
 
                 browsers.push('[Microsoft Edge](https://www.microsoft.com/edge)')
 
-                throw new MarpCLIError(
-                    `It requires to install ${browsers
+                const message = `It requires to install ${browsers
                     .join(', ')
                     .replace(/, ([^,]*)$/, ' or $1')} for exporting.`
-                )
+
+                new Notice(`Marp Slides export failed: ${message}`);
+                throw new MarpCLIError(message)
             }
+
+            const message = e instanceof Error ? e.message : String(e);
+            new Notice(`Marp Slides export failed after ${MarpExport.MAX_ATTEMPTS} attempts: ${message}`);
 
             throw e
         } finally {
@@ -148,25 +175,18 @@ export class MarpExport {
     }
 
     private async runMarpCli(argv: string[], resourcesPath: string) {
-        //console.info(`Execute Marp CLI [${argv.join(' ')}] (${JSON.stringify(opts)})`)
         console.info(`Execute Marp CLI [${argv.join(' ')}]`);
         let temp__dirname = __dirname;
 
-        try {    
+        try {
             __dirname = resourcesPath;
             const exitCode = await marpCli(argv, {});
 
             if (exitCode > 0) {
-                console.error(`Failure (Exit status: ${exitCode})`)
+                throw new Error(`Marp CLI exited with status ${exitCode}`);
             }
-        } catch(e) {
-            if (e instanceof CLIError){
-                console.error(`CLIError code: ${e.errorCode}, message: ${e.message}`);
-            } else {
-                console.error("Generic Error!");
-            }
+        } finally {
+            __dirname = temp__dirname;
         }
-
-        __dirname = temp__dirname;
     }
 }

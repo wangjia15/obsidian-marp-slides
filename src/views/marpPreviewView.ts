@@ -5,15 +5,16 @@ import { deflateSync } from 'zlib';
 
 import { MarpSlidesSettings } from '../utilities/settings'
 import { MarpExport } from '../utilities/marpExport';
+import { EditablePptxExport } from '../utilities/editablePptxExport';
 import { FilePath } from '../utilities/filePath'
-import { MathOptions } from '@marp-team/marp-core/types/src/math/math';
+import { createMarpInstance } from '../utilities/marpInstance';
 
 interface MermaidDimension {
     width?: string;
     height?: string;
 }
 
-function parseMermaidDimensions(markdown: string): {
+export function parseMermaidDimensions(markdown: string): {
     processedMarkdown: string;
     dimensionMap: Map<string, MermaidDimension>;
 } {
@@ -38,23 +39,33 @@ function parseMermaidDimensions(markdown: string): {
     return { processedMarkdown, dimensionMap };
 }
 
-function applyMermaidStyling(
+export function applyMermaidStyling(
     html: string,
     css: string,
     dimensionMap: Map<string, MermaidDimension>,
     globalWidth: string,
     globalHeight: string
 ): { html: string; css: string } {
-    if (dimensionMap.size > 0) {
+    const hasGlobalSizing = !!(globalWidth || globalHeight);
+
+    // Marp wraps kroki embeds in <marp-auto-scaling>, a shadow-DOM custom element that
+    // recalculates its own size via ResizeObserver and overrides any width/height we set
+    // on the <embed> itself. Unwrap it whenever explicit sizing is requested so the CSS
+    // we apply below actually controls the rendered size; diagrams with no sizing keep
+    // the default auto-fit-to-slide behavior.
+    if (dimensionMap.size > 0 || hasGlobalSizing) {
         html = html.replace(
-            /<embed(\s[^>]*?)?src="https:\/\/kroki\.io\/mermaid\/svg\/([^"]+)"/g,
-            (match, before: string, encoded: string) => {
+            /<marp-auto-scaling[^>]*>(<embed(\s[^>]*?)?src="https:\/\/kroki\.io\/mermaid\/svg\/([^"]+)")([\s\S]*?)<\/marp-auto-scaling>/g,
+            (match, _embedPrefix: string, before: string, encoded: string, tail: string) => {
                 const dim = dimensionMap.get(encoded);
-                if (!dim) return match;
+                if (!dim && !hasGlobalSizing) return match;
+
                 const styles: string[] = [];
-                if (dim.width) styles.push(`width:${dim.width}`);
-                if (dim.height) styles.push(`height:${dim.height}`);
-                return `<embed${before || ' '}style="${styles.join(';')}" src="https://kroki.io/mermaid/svg/${encoded}"`;
+                if (dim?.width) styles.push(`width:${dim.width}`);
+                if (dim?.height) styles.push(`height:${dim.height}`);
+
+                const styleAttr = styles.length > 0 ? `style="${styles.join(';')}" ` : '';
+                return `<embed${before || ' '}${styleAttr}src="https://kroki.io/mermaid/svg/${encoded}"${tail}`;
             }
         );
     }
@@ -69,15 +80,11 @@ function applyMermaidStyling(
     return { html, css };
 }
 
-const markdownItContainer = require('markdown-it-container');
-const markdownItMark = require('markdown-it-mark');
-const markdownItKroki = require('@kazumatu981/markdown-it-kroki');
-
 export const MARP_PREVIEW_VIEW = 'marp-preview-view';
 
 export class MarpPreviewView extends ItemView  {
-    private marp: Marp; 
-    
+    private marp: Marp;
+
     private marpBrowser: MarpCoreBrowser | undefined;
     private settings : MarpSlidesSettings;
 
@@ -87,26 +94,7 @@ export class MarpPreviewView extends ItemView  {
         super(leaf);
 
         this.settings = settings;
-
-        this.marp = new Marp({
-            container: { tag: 'div', id: '__marp-vscode' },
-            slideContainer: { tag: 'div', 'data-marp-vscode-slide-wrapper': '' },
-            html: this.settings.EnableHTML,
-            inlineSVG: {
-                enabled: true,
-                backdropSelector: false
-            },
-            math: this.settings.MathTypesettings as MathOptions,
-            minifyCSS: true,
-            script: false
-          });
-
-        if (this.settings.EnableMarkdownItPlugins){
-          this.marp
-            .use(markdownItContainer, "container")
-            .use(markdownItMark)
-            .use(markdownItKroki,{entrypoint: "https://kroki.io"});
-        }
+        this.marp = createMarpInstance(settings);
     }
 
     getViewType() {
@@ -158,7 +146,8 @@ export class MarpPreviewView extends ItemView  {
 
     async addActions() {
         const marpCli = new MarpExport(this.settings, this.app);
-        
+        const editablePptxExport = new EditablePptxExport(this.settings, this.app);
+
         this.addAction('image', 'Export as PNG', () => {
             if (this.file) {
                 marpCli.export(this.file, 'png');
@@ -180,6 +169,12 @@ export class MarpPreviewView extends ItemView  {
         this.addAction('slides-marp-export-pptx', 'Export as PPTX', () => {
             if (this.file) {
                 marpCli.export(this.file, 'pptx');
+            }
+        });
+
+        this.addAction('pencil', 'Export as Editable PPTX (text is editable, diagrams stay as images)', () => {
+            if (this.file) {
+                editablePptxExport.export(this.file);
             }
         });
 
