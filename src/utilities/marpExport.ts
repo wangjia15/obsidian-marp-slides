@@ -1,8 +1,10 @@
 import marpCli, { CLIError, CLIErrorCode } from '@marp-team/marp-cli'
 import { TFile, App, Notice } from 'obsidian';
 import { request as httpsRequest } from 'https';
+import { join } from 'path';
 import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
+import { tryAcquireExportLock, releaseExportLock } from './exportLock';
 import { writeFileSync, readFileSync } from 'fs-extra';
 
 const { generateUrl } = require('@kazumatu981/markdown-it-kroki/lib/diagram-encoder');
@@ -58,6 +60,32 @@ export class MarpExport {
     }
 
     async export(file: TFile, type: string){
+        // Preview mode keeps a watcher process alive until its window is closed,
+        // so it must not hold the export lock.
+        const needsLock = type !== 'preview';
+
+        if (needsLock) {
+            if (!tryAcquireExportLock()) {
+                new Notice('Marp Slides: another export is already running, please wait for it to finish.');
+                return;
+            }
+            new Notice(`Marp Slides: exporting "${file.basename}" (${type})...`);
+        }
+
+        try {
+            await this.doExport(file, type);
+
+            if (needsLock) {
+                new Notice(`Marp Slides: export of "${file.basename}" (${type}) completed.`);
+            }
+        } finally {
+            if (needsLock) {
+                releaseExportLock();
+            }
+        }
+    }
+
+    private async doExport(file: TFile, type: string){
         const filesTool = new FilePath(this.settings);
         await filesTool.removeFileFromRoot(file);
         await filesTool.copyFileToRoot(file);
@@ -98,7 +126,7 @@ export class MarpExport {
                     argv.push('--pdf');
                     if (this.settings.EXPORT_PATH != ''){
                         argv.push('-o');
-                        argv.push(`${this.settings.EXPORT_PATH}${file.basename}.pdf`);
+                        argv.push(join(this.settings.EXPORT_PATH, `${file.basename}.pdf`));
                     }
                     break;
                 case 'pdf-with-notes':
@@ -107,14 +135,14 @@ export class MarpExport {
                     argv.push('--pdf-outlines');
                     if (this.settings.EXPORT_PATH != ''){
                         argv.push('-o');
-                        argv.push(`${this.settings.EXPORT_PATH}${file.basename}.pdf`);
+                        argv.push(join(this.settings.EXPORT_PATH, `${file.basename}.pdf`));
                     }
                     break;
                 case 'pptx':
                     argv.push('--pptx');
                     if (this.settings.EXPORT_PATH != ''){
                         argv.push('-o');
-                        argv.push(`${this.settings.EXPORT_PATH}${file.basename}.pptx`);
+                        argv.push(join(this.settings.EXPORT_PATH, `${file.basename}.pptx`));
                     }
                     break;
                 case 'png':
@@ -122,7 +150,7 @@ export class MarpExport {
                     argv.push('--png');
                     if (this.settings.EXPORT_PATH != ''){
                         argv.push('-o');
-                        argv.push(`${this.settings.EXPORT_PATH}${file.basename}.png`);
+                        argv.push(join(this.settings.EXPORT_PATH, `${file.basename}.png`));
                     }
                     break;
                 case 'html':

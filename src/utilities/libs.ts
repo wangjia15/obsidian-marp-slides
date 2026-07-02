@@ -1,9 +1,10 @@
-import { App } from 'obsidian';
+import { App, Notice, requestUrl } from 'obsidian';
 import { FilePath } from './filePath';
 import { MarpSlidesSettings } from './settings';
 import { existsSync, outputFileSync } from 'fs-extra';
-import request from 'request';
 import JSZip from 'jszip';
+
+const LIB_DOWNLOAD_URL = 'https://github.com/samuele-cozzi/obsidian-marp-slides/releases/download/lib-v3/lib.zip';
 
 export class Libs {
 
@@ -12,50 +13,27 @@ export class Libs {
     constructor(settings: MarpSlidesSettings) {
         this.settings = settings;
     }
- 
-    loadLibs(app: App){
+
+    async loadLibs(app: App): Promise<void> {
         const libPathUtility = new FilePath(this.settings);
         const libPath = libPathUtility.getLibDirectory(app.vault);
 
-        if (!existsSync(libPath)) {
-			//Download binary
-			const downloadUrl = `https://github.com/samuele-cozzi/obsidian-marp-slides/releases/download/lib-v3/lib.zip`;
+        if (existsSync(libPath)) {
+            return;
+        }
 
-			const bufs: Uint8Array[] = [];
-			
-			let buf: Uint8Array;
-			request
-				.get(downloadUrl)
-				.on('end', () => {
-					console.log(bufs);
-					buf = Buffer.concat(bufs);
-					const zip : JSZip = new JSZip();
-					zip
-						.loadAsync(buf)
-						.then(contents => {
-							Object.keys(contents.files).forEach(function (filename) {
-								if (!contents.files[filename].dir) {
-									const file = zip.file(filename);
-									if (file != null){
-										file.async('nodebuffer')
-										.then(function (content) {
-											const dest = `${libPathUtility.getLibDirectory(app.vault)}${filename}`;
-											outputFileSync(dest, content);
-										});
-									}
-								}
-							});
-						})
-						.catch(error => {
-							console.log(error);
-						});
-				})
-				.on('error', error => {
-					console.log(error);
-				})
-				.on('data', (d : Buffer) => {
-					bufs.push(new Uint8Array(d.buffer));
-				});
-		}
+        try {
+            const response = await requestUrl({ url: LIB_DOWNLOAD_URL });
+            const zip = await JSZip.loadAsync(response.arrayBuffer);
+
+            const entries = Object.values(zip.files).filter((entry) => !entry.dir);
+            await Promise.all(entries.map(async (entry) => {
+                const content = await entry.async('nodebuffer');
+                outputFileSync(`${libPath}${entry.name}`, content);
+            }));
+        } catch (error) {
+            console.error('Marp Slides: failed to download export libraries.', error);
+            new Notice('Marp Slides: failed to download export libraries (needed for the Markdown-It plugins engine). Check your network connection and restart Obsidian to retry.');
+        }
     }
 }

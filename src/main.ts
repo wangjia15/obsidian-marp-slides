@@ -11,14 +11,13 @@ import { MarpSlidesSettings, DEFAULT_SETTINGS } from 'utilities/settings';
 export default class MarpSlides extends Plugin {
 	
 	public settings: MarpSlidesSettings;
-	private slidesView : MarpPreviewView;
 	private editorView : MarkdownView | null;
 
 	async onload() {
 		await this.loadSettings();
 
 		const libsUtility = new Libs(this.settings);
-		libsUtility.loadLibs(this.app);
+		void libsUtility.loadLibs(this.app);
 
 		this.registerView(
 			MARP_PREVIEW_VIEW,
@@ -90,10 +89,6 @@ export default class MarpSlides extends Plugin {
 		this.registerEvent(this.app.vault.on('modify', this.onChange.bind(this)));
 	}
 
-	onunload() {
-		this.app.workspace.detachLeavesOfType(MARP_PREVIEW_VIEW);
-	}
-
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
@@ -103,8 +98,8 @@ export default class MarpSlides extends Plugin {
 	}
 
 	onChange(file: TAbstractFile) {
-		if (file == this.editorView?.file) {
-			this.slidesView.onChange(this.editorView);
+		if (this.editorView && file == this.editorView.file) {
+			this.findViewInstance()?.onChange(this.editorView);
 		}
 	}
 
@@ -131,33 +126,37 @@ export default class MarpSlides extends Plugin {
 			return;
 		}
 
-		this.slidesView = await this.activateView();
-		this.slidesView.displaySlides(this.editorView);
+		const slidesView = await this.activateView();
+		slidesView.displaySlides(this.editorView);
 	}
-	
-	async activateView() : Promise<MarpPreviewView> {
-		this.app.workspace.detachLeavesOfType(MARP_PREVIEW_VIEW);
-	
-		await this.app.workspace.getLeaf('split').setViewState({
-			type: MARP_PREVIEW_VIEW,
-			active: true,
-		});
 
-		const leaf = this.app.workspace.getLeavesOfType(MARP_PREVIEW_VIEW)[0];
+	async activateView() : Promise<MarpPreviewView> {
+		let leaf = this.app.workspace.getLeavesOfType(MARP_PREVIEW_VIEW)[0];
+
+		if (!leaf) {
+			leaf = this.app.workspace.getLeaf('split');
+			await leaf.setViewState({
+				type: MARP_PREVIEW_VIEW,
+				active: true,
+			});
+		}
 
 		this.app.workspace.revealLeaf(leaf);
 
 		return leaf.view as MarpPreviewView;
 	}
 
-	getViewInstance(): MarpPreviewView | null {
+	findViewInstance(): MarpPreviewView | null {
 		const leaf = this.app.workspace.getLeavesOfType(MARP_PREVIEW_VIEW)[0];
-		if (leaf){
-			this.app.workspace.revealLeaf(leaf);
-			return leaf.view as MarpPreviewView;
-		} else {
-			return null;
+		return leaf ? leaf.view as MarpPreviewView : null;
+	}
+
+	getViewInstance(): MarpPreviewView | null {
+		const view = this.findViewInstance();
+		if (view) {
+			this.app.workspace.revealLeaf(view.leaf);
 		}
+		return view;
 	}
 }
 

@@ -6,6 +6,7 @@ import pptxgen from 'pptxgenjs';
 
 import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
+import { tryAcquireExportLock, releaseExportLock } from './exportLock';
 import { createMarpInstance } from './marpInstance';
 import { parseMermaidDimensions, applyMermaidStyling } from '../views/marpPreviewView';
 import { MarpCLIError } from './marpExport';
@@ -213,22 +214,33 @@ export class EditablePptxExport {
     async export(file: TFile): Promise<void> {
         if (!this.app) return;
 
-        let lastError: unknown;
-
-        for (let attempt = 1; attempt <= EditablePptxExport.MAX_ATTEMPTS; attempt++) {
-            try {
-                await this.doExport(file);
-                new Notice(`Marp Slides: exported editable PPTX for "${file.basename}".`);
-                return;
-            } catch (e) {
-                lastError = e;
-                console.warn(`Editable PPTX export attempt ${attempt}/${EditablePptxExport.MAX_ATTEMPTS} failed.`, e);
-            }
+        if (!tryAcquireExportLock()) {
+            new Notice('Marp Slides: another export is already running, please wait for it to finish.');
+            return;
         }
 
-        console.error(lastError);
-        const message = lastError instanceof Error ? lastError.message : String(lastError);
-        new Notice(`Marp Slides: editable PPTX export failed after ${EditablePptxExport.MAX_ATTEMPTS} attempts: ${message}`);
+        new Notice(`Marp Slides: exporting "${file.basename}" (editable PPTX)...`);
+
+        try {
+            let lastError: unknown;
+
+            for (let attempt = 1; attempt <= EditablePptxExport.MAX_ATTEMPTS; attempt++) {
+                try {
+                    await this.doExport(file);
+                    new Notice(`Marp Slides: exported editable PPTX for "${file.basename}".`);
+                    return;
+                } catch (e) {
+                    lastError = e;
+                    console.warn(`Editable PPTX export attempt ${attempt}/${EditablePptxExport.MAX_ATTEMPTS} failed.`, e);
+                }
+            }
+
+            console.error(lastError);
+            const message = lastError instanceof Error ? lastError.message : String(lastError);
+            new Notice(`Marp Slides: editable PPTX export failed after ${EditablePptxExport.MAX_ATTEMPTS} attempts: ${message}`);
+        } finally {
+            releaseExportLock();
+        }
     }
 
     private async doExport(file: TFile): Promise<void> {
@@ -349,7 +361,7 @@ export class EditablePptxExport {
             }
 
             const outputPath = this.settings.EXPORT_PATH !== ''
-                ? `${this.settings.EXPORT_PATH}${file.basename}-editable.pptx`
+                ? path.join(this.settings.EXPORT_PATH, `${file.basename}-editable.pptx`)
                 : path.join(path.dirname(completeFilePath), `${file.basename}-editable.pptx`);
 
             const buffer = (await pptx.write({ outputType: 'nodebuffer' })) as Buffer;
