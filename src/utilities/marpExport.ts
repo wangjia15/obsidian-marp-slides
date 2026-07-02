@@ -201,7 +201,7 @@ export class MarpExport {
                 } catch (e) {
                     lastError = e;
 
-                    if (e instanceof CLIError && e.errorCode === CLIErrorCode.NOT_FOUND_CHROMIUM) {
+                    if (e instanceof CLIError && e.errorCode === CLIErrorCode.NOT_FOUND_BROWSER) {
                         break;
                     }
 
@@ -215,7 +215,7 @@ export class MarpExport {
 
             if (
                 e instanceof CLIError &&
-                e.errorCode === CLIErrorCode.NOT_FOUND_CHROMIUM
+                e.errorCode === CLIErrorCode.NOT_FOUND_BROWSER
             ) {
                 const browsers = ['[Google Chrome](https://www.google.com/chrome/)']
 

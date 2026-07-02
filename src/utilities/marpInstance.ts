@@ -1,5 +1,4 @@
-import { Marp } from '@marp-team/marp-core'
-import { MathOptions } from '@marp-team/marp-core/types/src/math/math';
+import { Marp, MarpOptions } from '@marp-team/marp-core'
 import { MarpSlidesSettings } from './settings';
 
 const markdownItContainer = require('markdown-it-container');
@@ -15,7 +14,7 @@ export function createMarpInstance(settings: MarpSlidesSettings): Marp {
             enabled: true,
             backdropSelector: false
         },
-        math: settings.MathTypesettings as MathOptions,
+        math: settings.MathTypesettings as MarpOptions['math'],
         minifyCSS: true,
         script: false
     });

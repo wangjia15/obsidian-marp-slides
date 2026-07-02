@@ -342,7 +342,7 @@ export class EditablePptxExport {
                 : path.join(path.dirname(completeFilePath), `${file.basename}-editable.pptx`);
 
             const buffer = (await pptx.write({ outputType: 'nodebuffer' })) as Buffer;
-            writeFileSync(outputPath, buffer);
+            writeFileSync(outputPath, new Uint8Array(buffer));
         } finally {
             // Cleanup failures (e.g. Windows file locks on the Chrome temp profile) must
             // never mask the real error from the try block above.
