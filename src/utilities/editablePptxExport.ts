@@ -209,10 +209,14 @@ async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): 
                         continue;
                     }
 
-                    // Kroki wraps rendered diagrams in <p class="kroki-image-container"><embed .../></p>;
-                    // since P is also a normal text tag, only treat it as a text leaf when it has no
-                    // embedded media, otherwise recurse so the embed is captured as an image node.
-                    if (TEXT_TAGS.has(tag) && !child.querySelector('img, embed, svg')) {
+                    // Capture text from block text elements (their full text incl. inline
+                    // children) AND from leaf elements of any other tag that hold only text
+                    // — e.g. custom HTML cards whose nested <div>s carry KPI numbers/labels.
+                    // Container elements (those with element children) are recursed into.
+                    // Kroki wraps diagrams in <p><embed/></p>; the media guard keeps those
+                    // recursing so the embed is captured as an image node.
+                    const isLeafText = child.children.length === 0;
+                    if ((TEXT_TAGS.has(tag) || isLeafText) && !child.querySelector('img, embed, svg')) {
                         const text = child.textContent ?? '';
                         if (text.trim().length > 0) {
                             const r = child.getBoundingClientRect();
