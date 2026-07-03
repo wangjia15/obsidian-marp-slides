@@ -11,12 +11,41 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = (process.argv[2] === "production");
 
+// marp-cli 4.x ships rollup-prebundled chunks whose `import.meta.url` polyfill falls
+// back to `new URL("<chunk>.js", document.baseURI).href`. In Obsidian's renderer
+// `document.baseURI` is the `app://obsidian.md/` protocol root, so the polyfill yields
+// an `app://` URL. That URL is fed to `module.createRequire(import.meta.url)`, which
+// only accepts a `file:` URL or absolute path and therefore crashes the plugin at load
+// (TypeError: The argument 'filename' must be a file URL object...). Rewrite the
+// fallback to a real `file:` URL derived from the host executable. The one runtime
+// consumer of the require created here (`picomatch`) is loaded inside a try/catch, so
+// the anchor is not load-bearing — only its validity matters.
+const fixMarpCliImportMetaUrl = {
+	name: 'fix-marp-cli-import-meta-url',
+	setup(build) {
+		build.onLoad({ filter: /node_modules[\\\/]@marp-team[\\\/]marp-cli[\\\/]lib[\\\/].*\.js$/ }, async (args) => {
+			const { readFile } = await import('node:fs/promises');
+			let contents = await readFile(args.path, 'utf8');
+			contents = contents.replace(
+				/new\s+URL\(\s*"[^"]+\.js"\s*,\s*document\.baseURI\s*\)\.href/g,
+				'require("url").pathToFileURL(process.execPath).href',
+			);
+			return { contents, loader: 'js' };
+		});
+	},
+};
 const context = await esbuild.context({
 	banner: {
 		js: banner,
 	},
 	entryPoints: ["main.ts"],
 	bundle: true,
+	// NOTE: keepNames intentionally disabled. esbuild's name-preservation helper
+	// (`n(fn,"name")`) is defined at module scope, so any function it wraps and then
+	// serializes via puppeteer's `page.evaluate`/`waitForFunction` (fn.toString())
+	// references `n` in the browser page context where it is undefined -> ReferenceError.
+	// The size win came from `minify`, not keepNames.
+	plugins: [fixMarpCliImportMetaUrl],
 	external: [
 		"obsidian",
 		"electron",
@@ -39,7 +68,7 @@ const context = await esbuild.context({
 	platform: "node",
 	logLevel: "info",
 	minify: prod,
-	keepNames: prod,
+	// keepNames intentionally disabled — see note above (breaks page.evaluate serialization).
 	sourcemap: prod ? false : "inline",
 	treeShaking: true,
 	//outfile: "vault/.obsidian/plugins/marp-slides/main.js", //for local dev!!!

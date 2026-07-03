@@ -189,6 +189,19 @@ export class MarpExport {
     private async run(argv: string[], resourcesPath: string){
         const { CHROME_PATH } = process.env;
 
+        // marp-cli 4.x resolves the conversion engine via ESM `import()` when
+        // `isESMAvailable()` holds (`!('pkg' in process)`). The bundled plugin
+        // runs inside Obsidian's Electron renderer, where dynamic `import()` of a
+        // `file:` URL silently fails, so every `--engine` resolution (including
+        // the bundled marp.config.js) returns null and marp-cli aborts with
+        // "The specified engine has not resolved". `isStandaloneBinary()` is the
+        // designed gate: defining `process.pkg` flips it true and forces marp-cli
+        // onto its CommonJS `_silentRequire` path, which works here. It is the
+        // only consumer of the flag in marp-cli 4.x (engine.ts only).
+        const hadPkg = Reflect.has(process, 'pkg');
+        const savedPkg = Reflect.get(process, 'pkg');
+        Reflect.set(process, 'pkg', true);
+
         try {
             process.env.CHROME_PATH = this.settings.CHROME_PATH || CHROME_PATH;
 
@@ -237,7 +250,9 @@ export class MarpExport {
 
             throw e
         } finally {
-            process.env.CHROME_PATH = CHROME_PATH
+            process.env.CHROME_PATH = CHROME_PATH;
+            if (hadPkg) Reflect.set(process, 'pkg', savedPkg);
+            else Reflect.deleteProperty(process, 'pkg');
         }
     }
 

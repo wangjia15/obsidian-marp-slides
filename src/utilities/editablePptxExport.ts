@@ -1,6 +1,7 @@
 import { App, TFile, Notice, normalizePath, FileSystemAdapter } from 'obsidian';
 import * as path from 'path';
-import { existsSync, writeFileSync, removeSync } from 'fs-extra';
+import { fileURLToPath } from 'node:url';
+import { existsSync, readFileSync, writeFileSync, removeSync } from 'fs-extra';
 import puppeteer, { Browser } from 'puppeteer-core';
 import pptxgen from 'pptxgenjs';
 
@@ -29,6 +30,9 @@ interface SlideImageItem {
     type: 'image';
     id: string;
     x: number; y: number; w: number; h: number;
+    // When set, the image should be embedded from this source URL/path instead of a
+    // DOM screenshot — used for marp background figures so they keep full resolution.
+    url?: string;
 }
 
 type SlideItem = SlideTextItem | SlideImageItem;
@@ -37,6 +41,9 @@ interface SlideLayout {
     width: number;
     height: number;
     background: string;
+    // Default text colour resolved for the slide (from `_color` / theme); used so text on
+    // dark backgrounds isn't dropped when an individual leaf's computed colour is transparent.
+    color?: string;
     items: SlideItem[];
 }
 
@@ -44,30 +51,25 @@ function resolveChromePath(settings: MarpSlidesSettings): string {
     if (settings.CHROME_PATH) return settings.CHROME_PATH;
     if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
 
-    const candidates: string[] = (() => {
-        switch (process.platform) {
-            case 'win32':
-                return [
-                    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-                    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-                    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-                ];
-            case 'darwin':
-                return [
-                    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-                    '/Applications/Chromium.app/Contents/MacOS/Chromium',
-                    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-                ];
-            default:
-                return [
-                    '/usr/bin/google-chrome-stable',
-                    '/usr/bin/google-chrome',
-                    '/usr/bin/chromium-browser',
-                    '/usr/bin/chromium',
-                    '/usr/bin/microsoft-edge',
-                ];
-        }
-    })();
+    // Obsidian plugins run inside an Electron renderer whose global `process`
+    // may be Electron's stub rather than Node's, so `process.platform` cannot be
+    // trusted to select the right candidate list. Probe every well-known install
+    // location across platforms and return the first that exists on disk. Order is
+    // deliberate: the most common Windows paths first (this plugin's primary user
+    // base), then macOS, then Linux.
+    const candidates: string[] = [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/usr/bin/microsoft-edge',
+    ];
 
     const found = candidates.find(existsSync);
     if (found) return found;
@@ -77,16 +79,54 @@ function resolveChromePath(settings: MarpSlidesSettings): string {
     );
 }
 
+// DOM-side shape collected inside page.evaluate(); mirrored by the SlideItem types so the
+// serialized return value is typed without any `any`.
+interface CollectedTextItem {
+    type: 'text';
+    tag: string;
+    text: string;
+    x: number; y: number; w: number; h: number;
+    fontSize: number;
+    color: string;
+    fontWeight: string;
+    fontStyle: string;
+    textAlign: string;
+    fontFamily: string;
+}
+interface CollectedImageItem {
+    type: 'image';
+    id: string;
+    x: number; y: number; w: number; h: number;
+    url?: string;
+}
+type CollectedItem = CollectedTextItem | CollectedImageItem;
+interface CollectedSlide {
+    width: number;
+    height: number;
+    background: string;
+    color?: string;
+    items: CollectedItem[];
+}
+
 // Walks each rendered slide's DOM inside the page and extracts a layout tree of
 // leaf text nodes (with computed font/color/position) and leaf image nodes
-// (img / kroki embed), so they can be rebuilt as real editable pptxgenjs shapes
-// instead of a single flattened screenshot per slide.
+// (img / kroki embed / marp background figure), so they can be rebuilt as real
+// editable pptxgenjs shapes instead of a single flattened screenshot per slide.
+//
+// marp renders a background-image slide as one <svg> holding THREE <foreignObject>/<section>
+// siblings: data-marpit-advanced-background="background" (a <figure> with the bg image),
+// ="content" (the actual slide text), and ="pseudo". A plain slide has a single section.
+// The previous walker ran `svg.querySelector('section')` which grabbed only the "background"
+// section of a bg slide — empty of text, missing the <figure> — so background slides exported
+// with no text and no background. We now select the content/background sections explicitly.
 async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): Promise<SlideLayout[]> {
     return browserPage.evaluate(() => {
         const TEXT_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'LI', 'BLOCKQUOTE', 'TD', 'TH', 'PRE']);
         const SKIP_TAGS = new Set(['SCRIPT', 'STYLE']);
+        // Match a CSS url("...") value, tolerating quote/whitespace variants.
+        const URL_RE = /^url\(\s*["']?(.*?)["']?\s*\)$/i;
 
-        const slides: any[] = [];
+        const slides: CollectedSlide[] = [];
         const svgs = Array.from(document.querySelectorAll('svg[data-marpit-svg]')) as unknown as SVGSVGElement[];
         let uid = 0;
 
@@ -95,32 +135,64 @@ async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): 
             const w = vb && vb.width ? vb.width : 1280;
             const h = vb && vb.height ? vb.height : 720;
 
-            const wrapper = (svg.closest('[data-marp-vscode-slide-wrapper]') as HTMLElement) || (svg.parentElement as HTMLElement);
+            const wrapper = (svg.closest('[data-marp-vscode-slide-wrapper]') ?? svg.parentElement) as HTMLElement | null;
             if (wrapper) {
                 wrapper.style.width = `${w}px`;
                 wrapper.style.height = `${h}px`;
                 wrapper.style.overflow = 'hidden';
             }
-            (svg as unknown as HTMLElement).style.width = `${w}px`;
-            (svg as unknown as HTMLElement).style.height = `${h}px`;
-            (svg as unknown as HTMLElement).style.display = 'block';
-
-            const section = svg.querySelector('section');
-            if (!section) continue;
+            svg.style.width = `${w}px`;
+            svg.style.height = `${h}px`;
+            svg.style.display = 'block';
 
             // Force a reflow so getBoundingClientRect() reflects the forced size above.
-            void (section as HTMLElement).offsetHeight;
+            void (svg as unknown as HTMLElement).offsetHeight;
 
-            const secRect = section.getBoundingClientRect();
-            const background = getComputedStyle(section).backgroundColor;
-            const items: any[] = [];
+            const sections = Array.from(svg.querySelectorAll('section'));
+            // The content section holds the slide's text; on a plain slide it is the only one.
+            const contentSection =
+                sections.find((s) => s.getAttribute('data-marpit-advanced-background') === 'content') ??
+                sections.find((s) => !s.getAttribute('data-marpit-advanced-background')) ??
+                sections[0];
+            if (!contentSection) continue;
 
-            const walk = (node: Element) => {
+            const secRect = contentSection.getBoundingClientRect();
+            const contentStyle = getComputedStyle(contentSection);
+            const background = contentStyle.backgroundColor;
+            const color = contentStyle.color;
+            const items: CollectedItem[] = [];
+
+            // marp background image lives in a separate section as <figure style="background-image:url(...)">.
+            const bgSection = sections.find((s) => s.getAttribute('data-marpit-advanced-background') === 'background');
+            if (bgSection) {
+                const figure = bgSection.querySelector('figure');
+                if (figure) {
+                    const bgUrl = URL_RE.exec(getComputedStyle(figure).backgroundImage);
+                    if (bgUrl && bgUrl[1] && bgUrl[1] !== 'none') {
+                        const id = `export-el-${uid++}`;
+                        figure.setAttribute('data-export-id', id);
+                        const r = figure.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            items.push({
+                                type: 'image',
+                                id,
+                                url: bgUrl[1],
+                                x: r.left - secRect.left,
+                                y: r.top - secRect.top,
+                                w: r.width,
+                                h: r.height,
+                            });
+                        }
+                    }
+                }
+            }
+
+            const walk = (node: Element): void => {
                 for (const child of Array.from(node.children)) {
                     const tag = child.tagName;
                     if (SKIP_TAGS.has(tag)) continue;
 
-                    if (tag === 'IMG' || tag === 'EMBED') {
+                    if (tag === 'IMG' || tag === 'EMBED' || tag === 'SVG') {
                         const r = child.getBoundingClientRect();
                         if (r.width > 0 && r.height > 0) {
                             const id = `export-el-${uid++}`;
@@ -140,8 +212,8 @@ async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): 
                     // Kroki wraps rendered diagrams in <p class="kroki-image-container"><embed .../></p>;
                     // since P is also a normal text tag, only treat it as a text leaf when it has no
                     // embedded media, otherwise recurse so the embed is captured as an image node.
-                    if (TEXT_TAGS.has(tag) && !child.querySelector('img, embed')) {
-                        const text = (child as HTMLElement).innerText || child.textContent || '';
+                    if (TEXT_TAGS.has(tag) && !child.querySelector('img, embed, svg')) {
+                        const text = child.textContent ?? '';
                         if (text.trim().length > 0) {
                             const r = child.getBoundingClientRect();
                             if (r.width > 0 && r.height > 0) {
@@ -170,12 +242,12 @@ async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): 
                 }
             };
 
-            walk(section);
-            slides.push({ width: w, height: h, background, items });
+            walk(contentSection);
+            slides.push({ width: w, height: h, background, color, items });
         }
 
         return slides;
-    });
+    }) as Promise<SlideLayout[]>;
 }
 
 export class EditablePptxExport {
@@ -322,12 +394,30 @@ export class EditablePptxExport {
                             autoFit: false,
                         });
                     } else {
-                        const el = await page.$(`[data-export-id="${item.id}"]`);
-                        if (!el) continue;
-
-                        const shot = await el.screenshot({ type: 'png' });
+                        // Background figures carry a source URL — embed the original image
+                        // (full resolution) rather than a rasterized screenshot. Other image
+                        // nodes (kroki embeds, inline <svg>) have no recoverable source, so
+                        // screenshot the rendered DOM element.
+                        let imageData: string | undefined;
+                        if (item.url) {
+                            try {
+                                const src = item.url.startsWith('file://') ? fileURLToPath(item.url) : item.url;
+                                const buf = readFileSync(src);
+                                const ext = path.extname(item.url).toLowerCase();
+                                const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+                                imageData = `${mime};base64,${buf.toString('base64')}`;
+                            } catch (e) {
+                                console.warn(`Failed to read background image source ${item.url}; falling back to screenshot.`, e);
+                            }
+                        }
+                        if (!imageData) {
+                            const el = await page.$(`[data-export-id="${item.id}"]`);
+                            if (!el) continue;
+                            const shot = await el.screenshot({ type: 'png' });
+                            imageData = `image/png;base64,${Buffer.from(shot).toString('base64')}`;
+                        }
                         slide.addImage({
-                            data: `image/png;base64,${Buffer.from(shot).toString('base64')}`,
+                            data: imageData,
                             x: pxToIn(item.x),
                             y: pxToIn(item.y),
                             w: pxToIn(item.w),
