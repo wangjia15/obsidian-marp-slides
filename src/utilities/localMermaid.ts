@@ -1,4 +1,6 @@
 import { MarpSlidesSettings } from './settings';
+import { MermaidTheme, resolveDeckConfig } from './deckConfig';
+
 
 // Local mermaid rendering.
 //
@@ -16,26 +18,37 @@ import { MarpSlidesSettings } from './settings';
 type MermaidModule = typeof import('mermaid')['default'];
 
 let mermaidPromise: Promise<MermaidModule> | undefined;
+let initializedTheme = '';
 
-function getMermaid(): Promise<MermaidModule> {
+// mermaid.initialize() is global and survives across calls, so re-running it is
+// the only way to switch themes once the runtime is loaded. It's cheap, but
+// skip it when the requested theme hasn't changed.
+function getMermaid(theme: MermaidTheme): Promise<MermaidModule> {
     if (!mermaidPromise) {
         mermaidPromise = import('mermaid').then((m) => {
             const mermaid = m.default;
             mermaid.initialize({
                 startOnLoad: false,
                 securityLevel: 'loose',
-                theme: 'default',
+                theme,
             });
+            initializedTheme = theme;
             return mermaid;
         });
     }
-    return mermaidPromise;
+    return mermaidPromise.then((mermaid) => {
+        if (initializedTheme !== theme) {
+            mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme });
+            initializedTheme = theme;
+        }
+        return mermaid;
+    });
 }
 
 let renderCounter = 0;
 
-async function renderMermaidToSvg(code: string): Promise<string> {
-    const mermaid = await getMermaid();
+async function renderMermaidToSvg(code: string, theme: MermaidTheme): Promise<string> {
+    const mermaid = await getMermaid(theme);
     const id = `marp-slides-mermaid-${Date.now()}-${renderCounter++}`;
     const { svg } = await mermaid.render(id, code);
     return svg;
@@ -102,9 +115,14 @@ export async function renderMermaidInMarkdown(
         return { markdown, renderedCount: 0, failures: [] };
     }
 
+    // Diagrams embed no frontmatter of their own, so the deck-level mermaid
+    // theme is resolved from the surrounding markdown (marp-slides block)
+    // falling back to the plugin setting.
+    const { mermaidTheme } = resolveDeckConfig(markdown, settings);
+
     const rendered = await Promise.all(matches.map(async (m) => {
         try {
-            const svg = await renderMermaidToSvg(m.code.trimEnd());
+            const svg = await renderMermaidToSvg(m.code.trimEnd(), mermaidTheme);
             const width =
                 m.attrs.match(/width\s*=\s*([^\s}]+)/)?.[1] || settings.MermaidWidth || '100%';
             // '%' resolves against the `.mermaid` wrapper's own box (a shrinkable flex

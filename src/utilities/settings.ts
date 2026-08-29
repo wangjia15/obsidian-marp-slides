@@ -1,3 +1,5 @@
+import { SlideRatio, CodeTheme, MermaidTheme } from './deckConfig';
+
 export type MermaidRenderMode = 'local' | 'kroki';
 
 export interface MarpSlidesSettings {
@@ -13,6 +15,9 @@ export interface MarpSlidesSettings {
 	KrokiServerUrl: string;
 	MermaidWidth: string;
 	MermaidHeight: string;
+	SlideRatio: SlideRatio;
+	CodeTheme: CodeTheme;
+	MermaidTheme: MermaidTheme;
 }
 
 export const DEFAULT_SETTINGS: MarpSlidesSettings = {
@@ -30,5 +35,10 @@ export const DEFAULT_SETTINGS: MarpSlidesSettings = {
 	MermaidRenderMode: 'local',
 	KrokiServerUrl: 'https://kroki.io',
 	MermaidWidth: '',
-	MermaidHeight: ''
+	MermaidHeight: '',
+	// Deck-level defaults; each can be overridden per note via the `marp-slides`
+	// frontmatter block (see utilities/deckConfig.ts).
+	SlideRatio: '16:9',
+	CodeTheme: 'auto',
+	MermaidTheme: 'default'
 }

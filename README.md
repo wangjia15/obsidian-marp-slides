@@ -21,6 +21,30 @@ Marp have powerful tools for Markdown Slides: [Marpit Framework](https://marpit.
 - [Export slide deck (html, pdf, pptx, img)](https://samuele-cozzi.github.io/obsidian-marp-slides/22.SlidesExport.html) using Marp cli API
 - [Use custom theme CSS](https://samuele-cozzi.github.io/obsidian-marp-slides/23.SlidesCustomTheme.html)
 - [Presenting](https://samuele-cozzi.github.io/obsidian-marp-slides/24.Presenting.html)
+- Slide ratio (16:9 / 4:3), code highlight theme and mermaid theme — configurable
+  globally in settings and per deck in frontmatter
+
+## Deck tuning: ratio, code theme, mermaid theme
+
+Set global defaults in the plugin settings (*Slide ratio*, *Code highlight theme*,
+*Mermaid theme*), then override per deck in the note's frontmatter:
+
+```yaml
+---
+marp-slides:
+  ratio: 4:3          # or 16:9 (a native `size: 4:3` directive works too)
+  code-theme: one-dark  # auto | github | github-dark | one-dark | monokai | dracula
+  mermaid-theme: dark   # default | neutral | dark | forest | base
+---
+```
+
+- **ratio** — applied as Marp's `size` directive for the preview and every export
+  (PDF page size, PPTX slide size, PNG snapshots). Custom theme CSS without
+  `@size` metadata is patched automatically so the directive is honoured.
+- **code-theme** — `auto` keeps the slide theme's own code colors; the rest pin a
+  highlight.js palette for code blocks in preview and all exports.
+- **mermaid-theme** — used by the bundled offline mermaid renderer (local mode) and
+  injected as an `%%{init}%%` directive for Kroki rendering.
 
 ![Alt text](docs/pictures/ThemeSlides.gif)
 

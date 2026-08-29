@@ -7,6 +7,7 @@ import { ICON_SLIDE_PREVIEW, ICON_EXPORT_PDF, ICON_EXPORT_PPTX, ICON_SLIDE_PRESE
 import { Libs } from './utilities/libs';
 import { MarpSlidesSettings, DEFAULT_SETTINGS, MermaidRenderMode } from 'utilities/settings';
 import { testKrokiServer, normalizeKrokiUrl } from 'utilities/mermaid';
+import { SlideRatio, CodeTheme, MermaidTheme, SLIDE_RATIOS, CODE_THEMES, MERMAID_THEMES } from 'utilities/deckConfig';
 
 
 export default class MarpSlides extends Plugin {
@@ -243,6 +244,39 @@ export class MarpSlidesSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.HTMLExportMode)
 				.onChange(async (value) => {
 					this.plugin.settings.HTMLExportMode = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Slide Ratio')
+			.setDesc('Default aspect ratio for decks. Per-deck override: put ratio: 4:3 (or a native size: 4:3 directive) in the note\'s frontmatter.')
+			.addDropdown(dropdown => dropdown
+				.addOptions(SLIDE_RATIOS.reduce((acc, r) => ({ ...acc, [r]: r }), {} as Record<string, string>))
+				.setValue(this.plugin.settings.SlideRatio)
+				.onChange(async (value) => {
+					this.plugin.settings.SlideRatio = value as SlideRatio;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Code Highlight Theme')
+			.setDesc('Color palette for code blocks in preview and exports. "Auto" keeps the slide theme\'s own styling. Per-deck override: marp-slides: code-theme in frontmatter.')
+			.addDropdown(dropdown => dropdown
+				.addOptions(CODE_THEMES.reduce((acc, t) => ({ ...acc, [t]: t }), {} as Record<string, string>))
+				.setValue(this.plugin.settings.CodeTheme)
+				.onChange(async (value) => {
+					this.plugin.settings.CodeTheme = value as CodeTheme;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Mermaid Theme')
+			.setDesc('Theme used when rendering mermaid diagrams (local mode and Kroki). Per-deck override: marp-slides: mermaid-theme in frontmatter.')
+			.addDropdown(dropdown => dropdown
+				.addOptions(MERMAID_THEMES.reduce((acc, t) => ({ ...acc, [t]: t }), {} as Record<string, string>))
+				.setValue(this.plugin.settings.MermaidTheme)
+				.onChange(async (value) => {
+					this.plugin.settings.MermaidTheme = value as MermaidTheme;
 					await this.plugin.saveSettings();
 				}));
 		

@@ -10,6 +10,8 @@ import { FilePath } from './filePath';
 import { tryAcquireExportLock, releaseExportLock } from './exportLock';
 import { createMarpInstance } from './marpInstance';
 import { parseMermaidDimensions, applyMermaidStyling } from './mermaid';
+import { resolveDeckConfig, injectSizeDirective, ensureSizeMeta, injectMermaidInitTheme } from './deckConfig';
+import { buildCodeThemeCss } from './codeThemes';
 import { rgbToHex, isTransparent, pxToIn, pxToPt } from './units';
 import { MarpCLIError } from './marpExport';
 
@@ -399,12 +401,23 @@ export class EditablePptxExport {
         const markdownText = await app.vault.cachedRead(file);
         const processedMarkdown = filesTool.convertImageWikiLinks(markdownText, file, app);
 
+        // Deck-level tuning (ratio / code theme / mermaid theme) resolved from the
+        // note's frontmatter with the plugin settings as defaults, mirroring the
+        // preview and CLI export paths.
+        const deckConfig = resolveDeckConfig(processedMarkdown, this.settings);
+        const tunedMarkdown = injectSizeDirective(
+            this.settings.MermaidRenderMode === 'kroki'
+                ? injectMermaidInitTheme(processedMarkdown, deckConfig.mermaidTheme)
+                : processedMarkdown,
+            deckConfig
+        );
+
         // Local mermaid mode: replace fences with pre-rendered inline SVG before
         // the Marp conversion (mirrors the preview and CLI export paths).
-        let effectiveMarkdown = processedMarkdown;
+        let effectiveMarkdown = tunedMarkdown;
         if (this.settings.MermaidRenderMode === 'local') {
             const { renderMermaidInMarkdown } = await import('./localMermaid');
-            const local = await renderMermaidInMarkdown(processedMarkdown, this.settings);
+            const local = await renderMermaidInMarkdown(tunedMarkdown, this.settings);
             effectiveMarkdown = local.markdown;
             local.failures.forEach((f) =>
                 console.warn(`Marp Slides: local mermaid render failed: ${f.message}\n${f.source}`)
@@ -425,7 +438,9 @@ export class EditablePptxExport {
                     // last touched the theme CSS, and the vault's read cache for
                     // that file is not guaranteed to have caught up yet.
                     const content = await app.vault.read(file);
-                    marp.themeSet.add(content);
+                    // Prepend missing @size metadata so custom themes honour the
+                    // `size` directive (ratio setting / frontmatter) as well.
+                    marp.themeSet.add(ensureSizeMeta(content));
                 } catch (e) {
                     console.warn(`Marp Slides: failed to load theme file ${file.path}; skipping.`, e);
                 }
@@ -434,6 +449,7 @@ export class EditablePptxExport {
 
         let { html, css, comments } = marp.render(mdSized);
         ({ html, css } = applyMermaidStyling(html, css, dimensionMap, this.settings.MermaidWidth, this.settings.MermaidHeight, this.settings.KrokiServerUrl));
+        css += buildCodeThemeCss(deckConfig.codeTheme);
 
         const basePath = ((file.vault.adapter as FileSystemAdapter).getBasePath
             ? `file:///${(file.vault.adapter as FileSystemAdapter).getBasePath().replace(/\\/g, '/')}/${file.parent?.path ?? ''}/`

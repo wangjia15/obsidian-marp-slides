@@ -8,6 +8,8 @@ import { EditablePptxExport } from '../utilities/editablePptxExport';
 import { FilePath } from '../utilities/filePath'
 import { createMarpInstance } from '../utilities/marpInstance';
 import { parseMermaidDimensions, applyMermaidStyling } from '../utilities/mermaid';
+import { resolveDeckConfig, injectSizeDirective, ensureSizeMeta, injectMermaidInitTheme } from '../utilities/deckConfig';
+import { buildCodeThemeCss } from '../utilities/codeThemes';
 
 export const MARP_PREVIEW_VIEW = 'marp-preview-view';
 
@@ -71,7 +73,10 @@ export class MarpPreviewView extends ItemView  {
                         // saved (e.g. reopening the preview to pick up an edit), and
                         // the vault cache for that file is not guaranteed fresh yet.
                         const content = await this.app.vault.read(file);
-                        this.marp.themeSet.add(content);
+                        // Prepend @size metadata the theme may be missing, so the
+                        // `size` directive (ratio setting / frontmatter) works for
+                        // custom themes too, not just marp's built-ins.
+                        this.marp.themeSet.add(ensureSizeMeta(content));
                     } catch (e) {
                         console.warn(`Marp Slides: failed to load theme file ${file.path}; skipping.`, e);
                     }
@@ -116,7 +121,7 @@ export class MarpPreviewView extends ItemView  {
             const content = await this.app.vault.read(file);
             // ThemeSet.add replaces a previously registered theme with the same
             // @theme name, so this is a true swap rather than a duplicate entry.
-            this.marp.themeSet.add(content);
+            this.marp.themeSet.add(ensureSizeMeta(content));
         } catch (e) {
             console.warn(`Marp Slides: failed to reload theme file ${file.path}; keeping previous theme.`, e);
             return;
@@ -200,22 +205,35 @@ export class MarpPreviewView extends ItemView  {
             const basePath = filePath.getCompleteFileBasePath(view.file);
             const markdownText = view.data;
 
+            // Deck-level tuning (ratio / code theme / mermaid theme): frontmatter
+            // overrides win over the plugin settings.
+            const deckConfig = resolveDeckConfig(markdownText, this.settings);
+
             // Re-rendering is expensive (full Marp render + innerHTML swap); skip when
             // nothing that affects the output has changed.
-            const renderKey = `${basePath}|${this.settings.MermaidRenderMode}|${this.settings.KrokiServerUrl}|${this.settings.MermaidWidth}|${this.settings.MermaidHeight}|${markdownText}`;
+            const renderKey = `${basePath}|${this.settings.MermaidRenderMode}|${this.settings.KrokiServerUrl}|${this.settings.MermaidWidth}|${this.settings.MermaidHeight}|${deckConfig.ratio}|${deckConfig.codeTheme}|${deckConfig.mermaidTheme}|${markdownText}`;
             if (renderKey === this.lastRenderedKey) {
                 return;
             }
 
             // Convert wiki-link images to standard markdown
-            const processedMarkdown = filePath.convertImageWikiLinks(markdownText, view.file, this.app);
+            let processedMarkdown = filePath.convertImageWikiLinks(markdownText, view.file, this.app);
+
+            // Ratio: inject the resolved size as a Marp directive (no-op when the
+            // deck already pins `size` itself) and, for kroki-rendered diagrams,
+            // carry the mermaid theme into each fence source.
+            processedMarkdown = injectSizeDirective(processedMarkdown, deckConfig);
+            if (this.settings.MermaidRenderMode === 'kroki') {
+                processedMarkdown = injectMermaidInitTheme(processedMarkdown, deckConfig.mermaidTheme);
+            }
 
             const container = this.contentEl;
             container.empty();
 
             // Local mermaid mode: replace fences with pre-rendered inline SVG before
             // the Marp conversion. Failed diagrams keep their fence (visible source
-            // instead of a blank area).
+            // instead of a blank area). The mermaid theme is resolved from the same
+            // deck config inside renderMermaidInMarkdown.
             let effectiveMarkdown = processedMarkdown;
             if (this.settings.MermaidRenderMode === 'local') {
                 const { renderMermaidInMarkdown } = await import('../utilities/localMermaid');
@@ -229,6 +247,7 @@ export class MarpPreviewView extends ItemView  {
             const { processedMarkdown: mdSized, dimensionMap } = parseMermaidDimensions(effectiveMarkdown);
             let { html, css } = this.marp.render(mdSized);
             ({ html, css } = applyMermaidStyling(html, css, dimensionMap, this.settings.MermaidWidth, this.settings.MermaidHeight, this.settings.KrokiServerUrl));
+            css += buildCodeThemeCss(deckConfig.codeTheme);
             
             // Replace Backgorund Url for images
             html = html.replace(/(?!background-image:url\(&quot;http)background-image:url\(&quot;/g, `background-image:url(&quot;${basePath}`);

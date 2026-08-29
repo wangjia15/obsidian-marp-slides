@@ -2,11 +2,14 @@ import marpCli, { CLIError, CLIErrorCode } from '@marp-team/marp-cli'
 import { TFile, App, Notice } from 'obsidian';
 import { request as httpsRequest } from 'https';
 import { join } from 'path';
+import { tmpdir } from 'os';
 import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
 import { tryAcquireExportLock, releaseExportLock } from './exportLock';
 import { extractMermaidDiagrams, buildKrokiUrl, normalizeKrokiUrl } from './mermaid';
-import { writeFileSync, readFileSync, existsSync } from 'fs-extra';
+import { resolveDeckConfig, injectSizeDirective, ensureSizeMeta, injectMermaidInitTheme, DeckConfig } from './deckConfig';
+import { buildCodeThemeCss } from './codeThemes';
+import { writeFileSync, readFileSync, existsSync, copySync, removeSync, readdirSync } from 'fs-extra';
 
 export class MarpCLIError extends Error {}
 
@@ -36,17 +39,49 @@ async function prewarmMermaidDiagrams(markdown: string, baseUrl: string): Promis
     await Promise.all(urls.map((url) => prewarmKrokiUrl(url, 45000)));
 }
 
-// The deployed marp.config.js (lib3) registers markdown-it-kroki with its default
-// entrypoint. When the user has configured a custom Kroki server, rewrite the
-// config so the export engine and the prewarm URLs agree on it.
-function syncKrokiEntrypointInEngine(engineConfigPath: string, baseUrl: string): void {
-    const normalized = normalizeKrokiUrl(baseUrl);
-    if (normalized === 'https://kroki.io') return;
+// The deployed marp.config.js (lib3) registers the Markdown-It plugins. Two
+// export-time concerns are synced into it here:
+//   - the markdown-it-kroki entrypoint, so the export engine and the prewarm
+//     URLs agree on the configured Kroki server;
+//   - extra CSS (e.g. a selected code highlight theme) appended to every
+//     rendered deck, which plain CLI flags cannot express.
+// Only rewritten when the desired content differs from what's on disk.
+interface EngineConfigSpec {
+    pluginsEnabled: boolean;
+    krokiUrl: string;
+    extraCss: string;
+}
 
-    const config = `module.exports = ({ marp }) =>\n` +
-        `  marp.use(require("./markdown-it/@kazumatu981/markdown-it-kroki/index"), { entrypoint: "${normalized}" })\n` +
-        `  .use(require("./markdown-it/markdown-it-mark/dist/markdown-it-mark.min"))\n` +
-        `  .use(require("./markdown-it/markdown-it-container/dist/markdown-it-container.min"), "container");\n`;
+function buildEngineConfig(spec: EngineConfigSpec): string {
+    const lines: string[] = ['module.exports = ({ marp }) => {'];
+
+    if (spec.extraCss !== '') {
+        // Hook the instance's render to append our CSS after the theme CSS, so
+        // source order alone makes the overrides win.
+        lines.push(
+            `  const extraCss = ${JSON.stringify(spec.extraCss)};`,
+            '  const originalRender = marp.render.bind(marp);',
+            '  marp.render = (...args) => {',
+            '    const result = originalRender(...args);',
+            '    return { ...result, css: result.css + extraCss };',
+            '  };'
+        );
+    }
+
+    if (spec.pluginsEnabled) {
+        lines.push(
+            '  marp.use(require("./markdown-it/@kazumatu981/markdown-it-kroki/index"), { entrypoint: ' + JSON.stringify(normalizeKrokiUrl(spec.krokiUrl)) + ' })',
+            '    .use(require("./markdown-it/markdown-it-mark/dist/markdown-it-mark.min"))',
+            '    .use(require("./markdown-it/markdown-it-container/dist/markdown-it-container.min"), "container");'
+        );
+    }
+
+    lines.push('  return marp;', '};', '');
+    return lines.join('\n');
+}
+
+function syncEngineConfig(engineConfigPath: string, spec: EngineConfigSpec): void {
+    const config = buildEngineConfig(spec);
 
     try {
         const current = readFileSync(engineConfigPath, 'utf-8');
@@ -54,7 +89,36 @@ function syncKrokiEntrypointInEngine(engineConfigPath: string, baseUrl: string):
             writeFileSync(engineConfigPath, config, 'utf-8');
         }
     } catch (e) {
-        console.warn('Marp Slides: failed to sync Kroki entrypoint into the export engine config.', e);
+        console.warn('Marp Slides: failed to sync the export engine config.', e);
+    }
+}
+
+// marp-cli reads the theme folder straight from disk, so the in-memory @size
+// patch used by the preview cannot apply here. Instead, stage a patched copy of
+// the theme folder in the system temp dir — every CSS file gets the built-in
+// `@size` metadata prepended (files that already declare sizes keep theirs) —
+// and hand that copy to `--theme-set`. Theme assets ride along in the copy, so
+// relative url() references inside theme CSS keep resolving.
+const PATCHED_THEME_DIR = join(tmpdir(), 'marp-slides-theme-patch');
+
+function stagePatchedThemes(themePath: string): string | null {
+    if (themePath === '' || !existsSync(themePath)) return null;
+
+    try {
+        removeSync(PATCHED_THEME_DIR);
+        copySync(themePath, PATCHED_THEME_DIR);
+
+        for (const entry of readdirSync(PATCHED_THEME_DIR, { withFileTypes: true })) {
+            if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.css')) continue;
+
+            const file = join(PATCHED_THEME_DIR, entry.name);
+            writeFileSync(file, ensureSizeMeta(readFileSync(file, 'utf-8')), 'utf-8');
+        }
+
+        return PATCHED_THEME_DIR;
+    } catch (e) {
+        console.warn('Marp Slides: failed to stage patched theme CSS; exporting with the original theme folder.', e);
+        return null;
     }
 }
 
@@ -130,6 +194,31 @@ export class MarpExport {
                 }
             }
 
+            // Deck-level tuning (ratio / code theme / mermaid theme) resolved from
+            // the note's frontmatter with the plugin settings as defaults.
+            let deckConfig: DeckConfig;
+            try {
+                deckConfig = resolveDeckConfig(readFileSync(completeFilePath, 'utf-8'), this.settings);
+            } catch (e) {
+                console.warn('Marp Slides: failed to read the deck for config resolution; using plugin defaults.', e);
+                deckConfig = resolveDeckConfig('', this.settings);
+            }
+
+            // Ratio: stage the resolved size as a Marp directive (no-op when the
+            // deck already pins `size`), and carry the mermaid theme into kroki
+            // fence sources so server-side renders match the local ones.
+            let stagedMarkdown = injectSizeDirective(readFileSync(completeFilePath, 'utf-8'), deckConfig);
+            if (this.settings.MermaidRenderMode === 'kroki') {
+                stagedMarkdown = injectMermaidInitTheme(stagedMarkdown, deckConfig.mermaidTheme);
+            }
+            if (stagedMarkdown !== originalOnDisk) {
+                writeFileSync(completeFilePath, stagedMarkdown, 'utf-8');
+            }
+
+            // Code highlight theme has no CLI flag; it rides along through the
+            // engine config, which appends the CSS to every rendered deck.
+            const extraCss = buildCodeThemeCss(deckConfig.codeTheme);
+
             const argv: string[] = [completeFilePath,'--allow-local-files'];
             //const argv: string[] = ['--engine', '@marp-team/marp-core', completeFilePath,'--allow-local-files'];
 
@@ -142,19 +231,32 @@ export class MarpExport {
             }
 
             // The engine config lives in lib3/, downloaded from GitHub on first run.
-            // If it is missing (offline install, blocked download), fall back to the
-            // default engine instead of aborting the whole export with
+            // It is used for the Markdown-It plugins and for appending the code
+            // theme CSS; when only the latter is needed, plugins stay off. If the
+            // config is missing (offline install, blocked download), fall back to
+            // the default engine instead of aborting the whole export with
             // "The specified engine has not resolved".
-            if (this.settings.EnableMarkdownItPlugins && existsSync(marpEngineConfig)){
+            const needsEngine = this.settings.EnableMarkdownItPlugins || extraCss !== '';
+            if (needsEngine && existsSync(marpEngineConfig)){
+                syncEngineConfig(marpEngineConfig, {
+                    pluginsEnabled: this.settings.EnableMarkdownItPlugins,
+                    krokiUrl: this.settings.KrokiServerUrl,
+                    extraCss
+                });
                 argv.push('--engine');
                 argv.push(marpEngineConfig);
-            } else if (this.settings.EnableMarkdownItPlugins) {
-                console.warn(`Marp Slides: engine config not found at ${marpEngineConfig}; exporting with the default engine (Markdown-It plugins disabled).`);
+            } else if (needsEngine) {
+                console.warn(`Marp Slides: engine config not found at ${marpEngineConfig}; exporting with the default engine (${this.settings.EnableMarkdownItPlugins ? 'Markdown-It plugins' : 'code highlight theme'} disabled).`);
             }
 
-            if (themePath != ''){
+            // Themes are passed as a patched copy in temp storage: custom theme
+            // CSS rarely declares `@size` metadata, without which the size
+            // directive (ratio setting / frontmatter) is silently ignored.
+            const patchedThemeDir = stagePatchedThemes(themePath);
+            const effectiveThemePath = patchedThemeDir ?? themePath;
+            if (effectiveThemePath != ''){
                 argv.push('--theme-set');
-                argv.push(themePath);
+                argv.push(effectiveThemePath);
             }
 
             switch (type) {
@@ -232,7 +334,6 @@ export class MarpExport {
                 }
             } else if (this.settings.EnableMarkdownItPlugins) {
                 try {
-                    syncKrokiEntrypointInEngine(marpEngineConfig, this.settings.KrokiServerUrl);
                     await prewarmMermaidDiagrams(readFileSync(completeFilePath, 'utf-8'), normalizeKrokiUrl(this.settings.KrokiServerUrl));
                 } catch (e) {
                     console.warn('Failed to prewarm Mermaid diagrams before export.', e);
