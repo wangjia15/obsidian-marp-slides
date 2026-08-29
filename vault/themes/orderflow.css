@@ -1,0 +1,302 @@
+/* @theme orderflow */
+
+@import 'default';
+
+:root {
+  /* 正文楷体，与 notes 主题共用同一字体资源（见下方 @font-face） */
+  --font-body: 'LXGW WenKai', 'KaiTi', '楷体', 'STKaiti', serif;
+}
+
+/* ════════════════════════════════════════════════════════
+ * 本地字体 —— 与 notes 主题共用同一份文件，
+ * 放在与本主题同目录的 fonts/ 下（霞鹜文楷 LXGW WenKai，OFL 免费商用）。
+ * 体积较大未随仓库分发——下载方式见 fonts/README.md。
+ * src 顺序：系统已装字体（local()）→ 相对路径（fonts/…）。
+ * 没有字体文件时自动回退到字体栈里的下一个候选。
+ * ════════════════════════════════════════════════════════ */
+
+@font-face {
+  font-family: 'LXGW WenKai';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('LXGW WenKai'),
+    url('fonts/LXGWWenKai-Regular.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'LXGW WenKai';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  /* v1.522 起官方不再提供 Bold，以 Medium 作为加粗字面（同 notes.css） */
+  src: local('LXGW WenKai Medium'),
+    url('fonts/LXGWWenKai-Medium.ttf') format('truetype');
+}
+
+/* ===== 正文字体：楷体（与 notes 主题一致），配色仍是 orderflow 的商务蓝 ===== */
+section {
+  font-family: var(--font-body);
+}
+
+/* ===== CJK 字体回退链（代码，中文注释不乱码不缺字）===== */
+code,
+pre {
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas,
+    'Noto Sans Mono CJK SC', 'Microsoft YaHei', monospace;
+}
+
+/* ===== 基础版式 ===== */
+section {
+  font-size: 26px;
+  padding: 48px 64px;
+  background: linear-gradient(160deg, #fafbfd 0%, #eef2f7 100%);
+  --accent: #2563eb;
+}
+
+section h1 {
+  font-size: 1.7em;
+  color: #14315b;
+}
+
+section h2 {
+  font-size: 1.3em;
+  color: #14315b;
+  border-left: 10px solid #2563eb;
+  padding-left: 0.45em;
+}
+
+/* ===== 封面页 lead ===== */
+section.lead {
+  text-align: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #14315b 0%, #2563eb 100%);
+  color: #fff;
+}
+
+section.lead h1 {
+  font-size: 2.2em;
+  color: #fff;
+}
+
+section.lead h2 {
+  border: none;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+section.lead p {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* ===== 章节分隔页 divider ===== */
+section.divider {
+  justify-content: center;
+  background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+  color: #fff;
+}
+
+section.divider h2 {
+  border-left-color: #60a5fa;
+  color: #fff;
+  font-size: 1.8em;
+}
+
+/* ===== 紧凑页 ===== */
+section.compact {
+  font-size: 20px;
+}
+
+section.compact li {
+  margin-bottom: 0.2em;
+}
+
+/* ===== 代码块 ===== */
+pre,
+code {
+  font-size: 0.7em;
+}
+
+section pre {
+  max-height: 62%;
+  overflow: auto;
+}
+
+/* ===== Mermaid 图：尺寸约束相对剩余空间，而非视口 vh，防止随窗口/显示器变化溢出边界 ===== */
+.mermaid {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  justify-content: center;
+  align-items: center;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+}
+
+/* ===== 布局库：两栏 ===== */
+.cols {
+  display: flex;
+  gap: 1.2em;
+  align-items: flex-start;
+}
+
+.cols > div {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ===== 布局库：卡片 ===== */
+.cards {
+  display: flex;
+  gap: 1em;
+}
+
+.card {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.75);
+  border-top: 6px solid var(--accent);
+  border-radius: 10px;
+  padding: 0.7em 0.9em;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  font-size: 0.85em;
+}
+
+.card h3 {
+  margin: 0 0 0.3em;
+  font-size: 1.05em;
+  color: var(--accent);
+}
+
+/* ===== 布局库：KPI 大数字 ===== */
+.kpis {
+  display: flex;
+  gap: 1em;
+  text-align: center;
+}
+
+.kpi {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.75);
+  border-radius: 10px;
+  padding: 0.6em;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+}
+
+.kpi .num {
+  font-size: 2.1em;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1.15;
+}
+
+.kpi .label {
+  font-size: 0.7em;
+  opacity: 0.75;
+}
+
+/* ===== 布局库：步骤条 ===== */
+.steps {
+  display: flex;
+  gap: 0.6em;
+  counter-reset: step;
+}
+
+.steps > div {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.75);
+  border-radius: 10px;
+  padding: 0.6em 0.7em;
+  font-size: 0.75em;
+}
+
+.steps > div::before {
+  counter-increment: step;
+  content: counter(step);
+  display: inline-block;
+  width: 1.6em;
+  height: 1.6em;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  text-align: center;
+  line-height: 1.6em;
+  font-weight: 700;
+  margin-bottom: 0.3em;
+}
+
+.steps strong {
+  color: var(--accent);
+  font-size: 1.25em;
+}
+
+/* ===== 布局库：2×2 网格 ===== */
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8em 1.2em;
+}
+
+.grid2 > div {
+  background: rgba(255, 255, 255, 0.7);
+  border-left: 6px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.5em 0.8em;
+  font-size: 0.8em;
+}
+
+.grid2 strong {
+  color: var(--accent);
+}
+
+/* ===== 布局库：VS 对比页 ===== */
+.vs {
+  display: flex;
+  gap: 1em;
+}
+
+.vs > div {
+  flex: 1;
+  border-radius: 10px;
+  padding: 0.7em 0.9em;
+  font-size: 0.85em;
+}
+
+.vs .a {
+  background: rgba(37, 99, 235, 0.1);
+  border-top: 6px solid var(--accent);
+}
+
+.vs .b {
+  background: rgba(220, 38, 38, 0.08);
+  border-top: 6px solid #dc2626;
+}
+
+/* ===== 金句页 quote ===== */
+section.quote {
+  justify-content: center;
+  text-align: center;
+}
+
+section.quote blockquote {
+  border: none;
+  font-size: 1.45em;
+  font-style: italic;
+  line-height: 1.5;
+}
+
+section.quote blockquote::before {
+  content: '\201C';
+  display: block;
+  font-size: 2em;
+  color: var(--accent);
+  line-height: 0.8;
+}
+
+/* ===== 全局强调色 ===== */
+strong {
+  color: tomato;
+}

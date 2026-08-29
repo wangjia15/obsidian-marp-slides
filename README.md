@@ -24,6 +24,33 @@ Marp have powerful tools for Markdown Slides: [Marpit Framework](https://marpit.
 
 ![Alt text](docs/pictures/ThemeSlides.gif)
 
+## Bundled themes (Chinese-friendly)
+
+Two additional themes ship in [`vault/themes/`](vault/themes/). Copy the ones you want into
+your vault's theme folder (set in the plugin's *Theme path* setting) and reference them by
+name in the slide frontmatter:
+
+- **`orderflow`** — business-blue course deck: gradient paper, blue accent titles,
+  card / KPI / steps / VS layout helpers, `lead` & `divider` section classes, kai (楷体) body text.
+- **`notes`** — notebook style: cream paper with ruled lines and a red margin, sticky-note
+  quotes, highlighter `strong`, pencil-dashed code blocks, plus `.font-kai / .font-hei /
+  .font-song / .font-title` font-utility classes.
+
+Layout helpers (`cards`, `cols`, `steps`, `kpis`, `grid2`, `vs`, `quote`, `lead`, `divider`)
+work in both themes — wrap each card as `<div class="card">` inside `<div class="cards">`.
+
+### Chinese fonts
+
+Both themes load CJK web fonts (LXGW WenKai for body text, plus optional Smiley Sans /
+HarmonyOS Sans / Source Han families) via `@font-face` from `vault/themes/fonts/`.
+The font binaries are **not** committed (≈155 MB) — download links and licensing notes
+are in [`vault/themes/fonts/README.md`](vault/themes/fonts/README.md). If the fonts are
+installed on your system, `local()` picks them up automatically and no download is needed;
+otherwise the themes fall back to system kai/hei/song fonts.
+
+> Note for PPTX export: PowerPoint only *references* font names — the viewer's machine
+> must have the font installed for identical rendering.
+
 > ⚠️ Export except HTML requires to install any one of [Google Chrome](https://www.google.com/chrome/), [Chromium](https://www.chromium.org/), or [Microsoft Edge](https://www.microsoft.com/edge). You may also specify the custom path for Chrome / Chromium-based browser by preference `CHEROME_PATH`.
 
 ## Not supported

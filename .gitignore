@@ -26,6 +26,12 @@ tests/coverage
 
 vault/.obsidian
 
+# Font binaries referenced by vault/themes/*.css are NOT distributed in this repo.
+# They are large (~155MB) and must be downloaded manually — see vault/themes/fonts/README.md.
+# Only the README lives in git; everything else inside that folder is ignored.
+vault/themes/fonts/*
+!vault/themes/fonts/README.md
+
 lib
 
 # claude

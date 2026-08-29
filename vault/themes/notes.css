@@ -1,0 +1,533 @@
+/* @theme notes */
+
+@import 'default';
+
+/*
+ * 笔记风格主题 —— 手账/笔记本观感
+ * 用法：在幻灯片 frontmatter 写
+ *   ---
+ *   marp: true
+ *   theme: notes
+ *   ---
+ * 特点：米色纸面 + 横格线 + 左侧红边线，楷体正文，
+ *       重点词黄色荧光笔效果，引用为便利贴，代码为铅笔框。
+ */
+
+:root {
+  --paper: #fbf8f1;
+  --ink: #2b2d42;
+  --ink-soft: #5c677d;
+  --margin-red: #e63946;
+  --line-gray: rgba(43, 45, 66, 0.08);
+  --accent: #1d3557;
+  --highlight: #ffe66d;
+  --sticky: #fff9c4;
+
+  /* 字体族（正文楷 / 展示 / 黑体 / 宋体），对应下方 @font-face */
+  --font-body: 'LXGW WenKai', 'KaiTi', '楷体', 'STKaiti', serif;
+  --font-title: 'Smiley Sans', 'LXGW WenKai', 'KaiTi', serif;
+  --font-hei: 'HarmonyOS Sans SC', 'Microsoft YaHei', '微软雅黑',
+    'Source Han Sans SC', 'PingFang SC', sans-serif;
+  --font-song: 'Source Han Serif SC', 'Noto Serif SC', 'SimSun', serif;
+}
+
+/* ════════════════════════════════════════════════════════
+ * 本地字体 —— 文件放在跟本主题同目录的 fonts/ 下（全部免费商用，
+ * 但体积较大，没有随仓库分发——见 fonts/README.md 的下载说明）。
+ *   霞鹜文楷 LXGW WenKai   楷体正文（OFL）
+ *   得意黑 Smiley Sans     标题/大数字展示（OFL，斜体）
+ *   HarmonyOS Sans SC      华为鸿蒙黑体（官方免费）
+ *   思源黑体 Source Han Sans SC（OFL）
+ *   思源宋体 Source Han Serif SC（OFL）
+ * 微软雅黑为 Windows 系统字体（版权原因不随主题分发，
+ * 已并入 --font-hei 字体栈，本机自动可用）。
+ *
+ * src 顺序：系统已装字体（local()）→ 相对路径（fonts/…，需要自行下载放好，
+ * 见 fonts/README.md）。没有对应字体文件时会自动回退到字体栈里的下一个候选。
+ * ════════════════════════════════════════════════════════ */
+
+@font-face {
+  font-family: 'LXGW WenKai';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('LXGW WenKai'),
+    url('fonts/LXGWWenKai-Regular.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'LXGW WenKai';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  /* v1.522 起官方不再提供 Bold，以 Medium 作为加粗字面 */
+  src: local('LXGW WenKai Medium'),
+    url('fonts/LXGWWenKai-Medium.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Smiley Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('Smiley Sans'),
+    url('fonts/SmileySans-Oblique.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'HarmonyOS Sans SC';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('HarmonyOS Sans SC'),
+    url('fonts/HarmonyOS_Sans_SC_Regular.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'HarmonyOS Sans SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: local('HarmonyOS Sans SC Bold'),
+    url('fonts/HarmonyOS_Sans_SC_Bold.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Source Han Sans SC';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('Source Han Sans SC'),
+    url('fonts/SourceHanSansSC-Regular.otf') format('opentype');
+}
+@font-face {
+  font-family: 'Source Han Sans SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: local('Source Han Sans SC Bold'),
+    url('fonts/SourceHanSansSC-Bold.otf') format('opentype');
+}
+@font-face {
+  font-family: 'Source Han Serif SC';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('Source Han Serif SC'),
+    url('fonts/SourceHanSerifSC-Regular.otf') format('opentype');
+}
+@font-face {
+  font-family: 'Source Han Serif SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: local('Source Han Serif SC Bold'),
+    url('fonts/SourceHanSerifSC-Bold.otf') format('opentype');
+}
+
+section {
+  width: 1280px;
+  height: 720px;
+  padding: 56px 72px 56px 96px;
+
+  font-family: var(--font-body);
+  font-size: 28px;
+  color: var(--ink);
+  line-height: 1.55;
+
+  /* 纸面 + 40px 横格线 + 左侧红色边线 */
+  background-color: var(--paper);
+  background-image:
+    linear-gradient(90deg, var(--margin-red) 0 2px, transparent 2px),
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0 39px,
+      var(--line-gray) 39px 40px
+    );
+  background-repeat: no-repeat, repeat;
+}
+
+/* ── 标题 ─────────────────────────────────── */
+
+h1 {
+  font-size: 1.9em;
+  font-weight: 700;
+  color: var(--accent);
+  border-bottom: 3px double var(--accent);
+  padding-bottom: 0.18em;
+  margin-bottom: 0.6em;
+}
+
+h2 {
+  font-size: 1.45em;
+  font-weight: 700;
+  color: var(--accent);
+  border-left: 6px solid var(--margin-red);
+  padding-left: 0.5em;
+  margin-bottom: 0.55em;
+}
+
+h3 {
+  font-size: 1.15em;
+  color: var(--ink);
+  border-bottom: 2px dashed rgba(29, 53, 87, 0.35);
+  padding-bottom: 0.15em;
+}
+
+/* ── 重点：黄色荧光笔 ─────────────────────── */
+
+strong,
+b {
+  font-weight: 700;
+  color: var(--ink);
+  background: linear-gradient(transparent 58%, var(--highlight) 58%, var(--highlight) 92%, transparent 92%);
+  padding: 0 0.1em;
+}
+
+em {
+  color: var(--ink-soft);
+}
+
+mark {
+  background: var(--highlight);
+  padding: 0 0.2em;
+  border-radius: 3px;
+}
+
+/* ── 列表：手写箭头/圆圈符号 ───────────────── */
+
+ul {
+  list-style: none;
+  padding-left: 0.2em;
+}
+ul li {
+  position: relative;
+  padding-left: 1.2em;
+  margin-bottom: 0.35em;
+}
+ul li::before {
+  content: '✎';
+  position: absolute;
+  left: 0;
+  color: var(--margin-red);
+}
+ol {
+  padding-left: 1.4em;
+}
+ol li {
+  margin-bottom: 0.35em;
+}
+
+/* ── 引用：便利贴 ─────────────────────────── */
+
+blockquote {
+  background: var(--sticky);
+  border: 1px dashed rgba(43, 45, 66, 0.35);
+  border-radius: 6px;
+  box-shadow: 2px 3px 8px rgba(43, 45, 66, 0.12);
+  padding: 0.6em 1em;
+  margin: 0.8em 0;
+  color: var(--ink);
+  transform: rotate(-0.4deg);
+}
+
+/* ── 代码：铅笔虚线框 ─────────────────────── */
+
+code {
+  font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
+  background: rgba(43, 45, 66, 0.06);
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+  font-size: 0.82em;
+}
+
+pre {
+  background: #fffdf8;
+  border: 2px dashed rgba(29, 53, 87, 0.4);
+  border-radius: 8px;
+  padding: 0.8em 1em;
+  font-size: 0.72em;
+  line-height: 1.5;
+}
+pre code {
+  background: none;
+  padding: 0;
+}
+
+/* ── 表格：铅笔手绘风 ─────────────────────── */
+
+table {
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+th {
+  border-bottom: 3px solid var(--accent);
+  color: var(--accent);
+  padding: 0.35em 0.8em;
+  text-align: left;
+}
+td {
+  border-bottom: 1.5px dashed rgba(43, 45, 66, 0.3);
+  padding: 0.3em 0.8em;
+}
+
+/* ── 页脚与页码：铅笔灰 ───────────────────── */
+
+footer {
+  font-size: 0.62em;
+  color: var(--ink-soft);
+  letter-spacing: 0.05em;
+}
+
+section::after {
+  /* Marp 分页页码 */
+  font-size: 0.72em;
+  color: var(--ink-soft);
+  bottom: 24px;
+  right: 40px;
+}
+
+/* ── 封面页／分隔页：跟正文一样的米色笔记纸，不整页反色 ───── */
+
+section.lead {
+  text-align: center;
+  justify-content: center;
+}
+section.lead h1 {
+  font-size: 2.3em;
+}
+section.lead h2 {
+  border-left: none;
+  color: var(--ink-soft);
+}
+
+/* 分隔页保持跟其它页一样的米色笔记纸背景，只靠居中大标题 + 双线下划线
+   （呼应 h1 的双线风格）来标出"这是一个新的章节"，不整页反色。 */
+section.divider {
+  justify-content: center;
+  text-align: center;
+}
+section.divider h2 {
+  display: inline-block;
+  border-left: none;
+  border-bottom: 3px double var(--accent);
+  padding: 0 0.2em 0.2em;
+  font-size: 2em;
+}
+
+/* ════════════════════════════════════════════════════════
+ * 布局组件 —— 参考课程 deck 内联 style 的水平排列与 mermaid 约束，
+ * 配色适配笔记风（纸面白卡 / 红边线强调 / 墨蓝主色）。
+ * 用法与原 deck 完全一致：<div class="cards">…<div class="card">…
+ * ════════════════════════════════════════════════════════ */
+
+/* ── mermaid：居中 + 尺寸约束（相对剩余空间，而非视口 vh，防止随窗口/显示器变化溢出边界） ── */
+
+.mermaid {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  justify-content: center;
+  align-items: center;
+}
+.mermaid svg {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+}
+
+/* ── 双栏图文分屏 ─────────────────────────── */
+
+.cols {
+  display: flex;
+  gap: 1.2em;
+  align-items: flex-start;
+}
+.cols > div {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── 特性卡片行 ───────────────────────────── */
+
+.cards {
+  display: flex;
+  gap: 1em;
+}
+.card {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.72);
+  border-top: 6px solid var(--margin-red);
+  border-radius: 8px;
+  padding: 0.7em 0.9em;
+  box-shadow: 2px 3px 8px rgba(43, 45, 66, 0.1);
+  font-size: 0.85em;
+}
+.card h3 {
+  margin: 0 0 0.3em;
+  font-size: 1.05em;
+  color: var(--accent);
+  border-bottom: none;
+}
+
+/* ── KPI 大数字行 ─────────────────────────── */
+
+.kpis {
+  display: flex;
+  gap: 1em;
+  text-align: center;
+}
+.kpi {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1.5px dashed rgba(29, 53, 87, 0.35);
+  border-radius: 8px;
+  padding: 0.6em;
+  box-shadow: 2px 3px 8px rgba(43, 45, 66, 0.08);
+}
+.kpi .num {
+  font-size: 2.1em;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1.15;
+}
+.kpi .label {
+  font-size: 0.7em;
+  opacity: 0.75;
+}
+
+/* ── 步骤条（自动编号圆徽章） ─────────────── */
+
+.steps {
+  display: flex;
+  gap: 0.6em;
+  counter-reset: step;
+}
+.steps > div {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.72);
+  border-radius: 8px;
+  padding: 0.6em 0.7em;
+  font-size: 0.75em;
+}
+.steps > div::before {
+  counter-increment: step;
+  content: counter(step);
+  display: inline-block;
+  width: 1.6em;
+  height: 1.6em;
+  border-radius: 50%;
+  background: var(--margin-red);
+  color: #fff;
+  text-align: center;
+  line-height: 1.6em;
+  font-weight: 700;
+  margin-bottom: 0.3em;
+}
+.steps strong {
+  color: var(--accent);
+  font-size: 1.25em;
+  background: none;
+  padding: 0;
+}
+
+/* ── 对比页（左蓝右红） ───────────────────── */
+
+.vs {
+  display: flex;
+  gap: 1em;
+}
+.vs > div {
+  flex: 1;
+  border-radius: 8px;
+  padding: 0.7em 0.9em;
+  font-size: 0.85em;
+}
+.vs .a {
+  background: rgba(29, 53, 87, 0.08);
+  border-top: 6px solid var(--accent);
+}
+.vs .b {
+  background: rgba(230, 57, 70, 0.07);
+  border-top: 6px solid var(--margin-red);
+}
+
+/* ── 二列要点网格 ─────────────────────────── */
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8em 1.2em;
+}
+.grid2 > div {
+  background: rgba(255, 255, 255, 0.7);
+  border-left: 6px solid var(--accent);
+  border-radius: 6px;
+  padding: 0.5em 0.8em;
+  font-size: 0.8em;
+}
+.grid2 strong {
+  color: var(--accent);
+  background: none;
+  padding: 0;
+}
+
+/* ── 紧凑页与金句页 ───────────────────────── */
+
+section.compact {
+  font-size: 20px;
+}
+section.compact li {
+  margin-bottom: 0.2em;
+}
+section.quote {
+  justify-content: center;
+  text-align: center;
+}
+section.quote blockquote {
+  font-size: 1.45em;
+  font-style: italic;
+  line-height: 1.5;
+  transform: none;
+}
+
+/* 代码块滚动上限（长代码页防溢出） */
+section pre {
+  max-height: 62%;
+  overflow: auto;
+}
+
+/* ════════════════════════════════════════════════════════
+ * 字体切换工具类 —— 任意元素上加 class 即可换字体
+ *   .font-kai     霞鹜文楷（正文楷，默认）
+ *   .font-hei     鸿蒙黑体 → 微软雅黑 → 思源黑体
+ *   .font-yahei   微软雅黑（系统字体，Windows 直接可用）
+ *   .font-song    思源宋体（庄重标题/引用）
+ *   .font-title   得意黑（大标题/大数字，自带 14° 倾斜）
+ * 用法：<div class="font-hei">…</div> 或 <h1 class="font-song">
+ * ════════════════════════════════════════════════════════ */
+
+.font-kai {
+  font-family: var(--font-body);
+}
+.font-hei {
+  font-family: var(--font-hei);
+}
+.font-yahei {
+  font-family: 'Microsoft YaHei', '微软雅黑', 'PingFang SC', sans-serif;
+}
+.font-song {
+  font-family: var(--font-song);
+}
+.font-title {
+  font-family: var(--font-title);
+}
+
+/* 应用点：KPI 大数字用得意黑更醒目；表格表头用黑体更清晰 */
+.kpi .num {
+  font-family: var(--font-title);
+}
+table th {
+  font-family: var(--font-hei);
+}
+/* 金句页引用用宋体更有讲稿感 */
+section.quote blockquote {
+  font-family: var(--font-song);
+}
