@@ -5,10 +5,8 @@ import { join } from 'path';
 import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
 import { tryAcquireExportLock, releaseExportLock } from './exportLock';
-import { extractMermaidDiagrams } from './mermaid';
-import { writeFileSync, readFileSync } from 'fs-extra';
-
-const { generateUrl } = require('@kazumatu981/markdown-it-kroki/lib/diagram-encoder');
+import { extractMermaidDiagrams, buildKrokiUrl, normalizeKrokiUrl } from './mermaid';
+import { writeFileSync, readFileSync, existsSync } from 'fs-extra';
 
 export class MarpCLIError extends Error {}
 
@@ -30,12 +28,34 @@ function prewarmKrokiUrl(url: string, timeoutMs: number): Promise<void> {
     });
 }
 
-async function prewarmMermaidDiagrams(markdown: string): Promise<void> {
+async function prewarmMermaidDiagrams(markdown: string, baseUrl: string): Promise<void> {
     const diagrams = extractMermaidDiagrams(markdown);
     if (diagrams.length === 0) return;
 
-    const urls = diagrams.map((code) => generateUrl('https://kroki.io', 'mermaid', 'svg', code));
+    const urls = diagrams.map((code) => buildKrokiUrl(baseUrl, code));
     await Promise.all(urls.map((url) => prewarmKrokiUrl(url, 45000)));
+}
+
+// The deployed marp.config.js (lib3) registers markdown-it-kroki with its default
+// entrypoint. When the user has configured a custom Kroki server, rewrite the
+// config so the export engine and the prewarm URLs agree on it.
+function syncKrokiEntrypointInEngine(engineConfigPath: string, baseUrl: string): void {
+    const normalized = normalizeKrokiUrl(baseUrl);
+    if (normalized === 'https://kroki.io') return;
+
+    const config = `module.exports = ({ marp }) =>\n` +
+        `  marp.use(require("./markdown-it/@kazumatu981/markdown-it-kroki/index"), { entrypoint: "${normalized}" })\n` +
+        `  .use(require("./markdown-it/markdown-it-mark/dist/markdown-it-mark.min"))\n` +
+        `  .use(require("./markdown-it/markdown-it-container/dist/markdown-it-container.min"), "container");\n`;
+
+    try {
+        const current = readFileSync(engineConfigPath, 'utf-8');
+        if (current !== config) {
+            writeFileSync(engineConfigPath, config, 'utf-8');
+        }
+    } catch (e) {
+        console.warn('Marp Slides: failed to sync Kroki entrypoint into the export engine config.', e);
+    }
 }
 
 export class MarpExport {
@@ -83,26 +103,53 @@ export class MarpExport {
         const resourcesPath = filesTool.getLibDirectory(file.vault);
         const marpEngineConfig = filesTool.getMarpEngine(file.vault);
 
-        // Convert wiki-link images to standard markdown before export
-        if (this.app && completeFilePath != '') {
-            try {
-                const originalContent = readFileSync(completeFilePath, 'utf-8');
-                const processedContent = filesTool.convertImageWikiLinks(originalContent, file, this.app);
-                writeFileSync(completeFilePath, processedContent, 'utf-8');
-            } catch (e) {
-                console.error('Failed to process wiki-links for export:', e);
-            }
-        }
+        if (completeFilePath == '') return;
 
-        if (completeFilePath != ''){
-            //console.log(completeFilePath);
+        // marp-cli is a CLI: it needs the deck on disk and reads it itself, so the
+        // wiki-link conversion and (when MermaidRenderMode is 'local') the mermaid
+        // pre-render below both mutate `completeFilePath` in place before invoking
+        // it. `getCompleteFilePath` only returns a throwaway root copy when the vault
+        // uses the rare "absolute" new-link-format setting (see FilePath.
+        // copyFileToRoot) — for every default-configured vault it is the path of the
+        // ORIGINAL note. Snapshot its pristine bytes now and restore them in
+        // `finally`, so a crash mid-export can't leave the transformed content
+        // (expanded <img> links, or a source-losing mermaid-fence -> inline-SVG
+        // rewrite) permanently overwriting the user's actual note.
+        const originalOnDisk = existsSync(completeFilePath)
+            ? readFileSync(completeFilePath, 'utf-8')
+            : undefined;
+
+        try {
+            // Convert wiki-link images to standard markdown before export
+            if (this.app) {
+                try {
+                    const processedContent = filesTool.convertImageWikiLinks(originalOnDisk ?? '', file, this.app);
+                    writeFileSync(completeFilePath, processedContent, 'utf-8');
+                } catch (e) {
+                    console.error('Failed to process wiki-links for export:', e);
+                }
+            }
 
             const argv: string[] = [completeFilePath,'--allow-local-files'];
             //const argv: string[] = ['--engine', '@marp-team/marp-core', completeFilePath,'--allow-local-files'];
 
-            if (this.settings.EnableMarkdownItPlugins){
+            // Local mermaid mode replaces fences with raw-HTML inline SVG before the
+            // CLI conversion, so HTML passthrough must be enabled for every export
+            // type (pptx/pdf/png would otherwise escape the SVG as plain text).
+            const localMermaid = this.settings.MermaidRenderMode === 'local';
+            if (this.settings.EnableHTML || localMermaid) {
+                argv.push('--html');
+            }
+
+            // The engine config lives in lib3/, downloaded from GitHub on first run.
+            // If it is missing (offline install, blocked download), fall back to the
+            // default engine instead of aborting the whole export with
+            // "The specified engine has not resolved".
+            if (this.settings.EnableMarkdownItPlugins && existsSync(marpEngineConfig)){
                 argv.push('--engine');
                 argv.push(marpEngineConfig);
+            } else if (this.settings.EnableMarkdownItPlugins) {
+                console.warn(`Marp Slides: engine config not found at ${marpEngineConfig}; exporting with the default engine (Markdown-It plugins disabled).`);
             }
 
             if (themePath != ''){
@@ -143,12 +190,10 @@ export class MarpExport {
                     }
                     break;
                 case 'html':
-                    argv.push('--html');
                     argv.push('--template');
                     argv.push(this.settings.HTMLExportMode);
                     break;
                 case 'preview':
-                    argv.push('--html');
                     argv.push('--preview');
                     break;
                 default:
@@ -161,21 +206,50 @@ export class MarpExport {
                     //process.env.PORT = "5001";
                     //argv.push('PORT=5001');
                     //argv.push('--server');
-                    
+
                     //argv.push('--watch');
             }
 
-            if (this.settings.EnableMarkdownItPlugins) {
+            if (localMermaid) {
+                // Render every mermaid fence offline into inline SVG inside the
+                // staged copy of the deck; the pristine original is restored in
+                // `finally` below regardless of how this turns out.
                 try {
-                    await prewarmMermaidDiagrams(readFileSync(completeFilePath, 'utf-8'));
+                    const staged = readFileSync(completeFilePath, 'utf-8');
+                    const { renderMermaidInMarkdown } = await import('./localMermaid');
+                    const result = await renderMermaidInMarkdown(staged, this.settings);
+                    if (result.renderedCount > 0) {
+                        writeFileSync(completeFilePath, result.markdown, 'utf-8');
+                    }
+                    result.failures.forEach((f) =>
+                        console.warn(`Marp Slides: local mermaid render failed: ${f.message}\n${f.source}`)
+                    );
+                    if (result.failures.length > 0) {
+                        new Notice(`Marp Slides: ${result.failures.length} mermaid diagram(s) failed to render locally and were left as code blocks.`);
+                    }
+                } catch (e) {
+                    console.error('Marp Slides: local mermaid pre-render failed before export.', e);
+                }
+            } else if (this.settings.EnableMarkdownItPlugins) {
+                try {
+                    syncKrokiEntrypointInEngine(marpEngineConfig, this.settings.KrokiServerUrl);
+                    await prewarmMermaidDiagrams(readFileSync(completeFilePath, 'utf-8'), normalizeKrokiUrl(this.settings.KrokiServerUrl));
                 } catch (e) {
                     console.warn('Failed to prewarm Mermaid diagrams before export.', e);
                 }
             }
 
             await this.run(argv, resourcesPath);
+        } finally {
+            if (originalOnDisk !== undefined) {
+                try {
+                    writeFileSync(completeFilePath, originalOnDisk, 'utf-8');
+                } catch (e) {
+                    console.error('Marp Slides: failed to restore the original note after export; it may still contain export-time transformations (converted wiki-links / rendered mermaid SVG). Please check the file.', e);
+                    new Notice(`Marp Slides: could not restore "${file.basename}" after export — please check it wasn't left modified.`);
+                }
+            }
         }
-
     }
 
     //async exportPdf(argv: string[], opts?: MarpCLIAPIOptions | undefined){

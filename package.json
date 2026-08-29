@@ -1,6 +1,6 @@
 {
 	"name": "marp-slides",
-	"version": "0.46.1",
+	"version": "0.47.0",
 	"description": "Create markdown-based marp presentations in Obsidian ",
 	"main": "src/main.js",
 	"scripts": {
@@ -36,6 +36,7 @@
 		"@marp-team/marpit": "3.2.1",
 		"fs-extra": "^11.2.0",
 		"jszip": "^3.10.1",
+		"mermaid": "^11.17.2",
 		"pptxgenjs": "4.0.1",
 		"puppeteer-core": "25.3.0"
 	}

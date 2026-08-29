@@ -15,6 +15,7 @@ import { MarpCLIError } from './marpExport';
 
 interface SlideTextItem {
     type: 'text';
+    id: string;
     tag: string;
     text: string;
     x: number; y: number; w: number; h: number;
@@ -41,10 +42,44 @@ interface SlideLayout {
     width: number;
     height: number;
     background: string;
+    // Computed background-image of the slide section, when present (CSS gradients
+    // on dark title/divider slides). pptxgenjs only fills solid colours, so this
+    // feeds the gradientFallbackColor approximation.
+    backgroundImage?: string;
     // Default text colour resolved for the slide (from `_color` / theme); used so text on
     // dark backgrounds isn't dropped when an individual leaf's computed colour is transparent.
     color?: string;
     items: SlideItem[];
+}
+
+// Marp decks commonly paint title/divider slides with a dark CSS gradient while
+// their text is white. The editable export only fills solid background colours,
+// which turns those slides into white pages with invisible white text. Approximate
+// the gradient with its first colour stop so light text stays readable.
+export function gradientFallbackColor(background: string | undefined, backgroundImage: string | undefined): string | undefined {
+    if (background && !isTransparent(background)) return undefined;
+    if (!backgroundImage || !backgroundImage.includes('gradient')) return undefined;
+
+    const m = backgroundImage.match(/#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)/);
+    if (!m) return undefined;
+
+    return m[0].startsWith('#')
+        ? (m[0].length === 4
+            ? '#' + m[0].slice(1).split('').map((ch) => ch + ch).join('')
+            : m[0]).slice(1).toUpperCase()
+        : rgbToHex(m[0]);
+}
+
+// Computed `font-family` is the full author-specified fallback stack (e.g.
+// `"LXGW WenKai", "KaiTi", "楷体", serif`), never resolved to whichever font the
+// browser actually picked. pptxgenjs's `fontFace` takes exactly one name, so use
+// the first entry — quotes stripped — as the best available signal of intent.
+// Falls back to undefined (pptx default font) for empty/generic-only stacks.
+export function firstFontFamily(fontFamily: string | undefined): string | undefined {
+    if (!fontFamily) return undefined;
+
+    const first = fontFamily.split(',')[0]?.trim().replace(/^['"]|['"]$/g, '');
+    return first ? first : undefined;
 }
 
 function resolveChromePath(settings: MarpSlidesSettings): string {
@@ -83,6 +118,7 @@ function resolveChromePath(settings: MarpSlidesSettings): string {
 // serialized return value is typed without any `any`.
 interface CollectedTextItem {
     type: 'text';
+    id: string;
     tag: string;
     text: string;
     x: number; y: number; w: number; h: number;
@@ -104,6 +140,7 @@ interface CollectedSlide {
     width: number;
     height: number;
     background: string;
+    backgroundImage?: string;
     color?: string;
     items: CollectedItem[];
 }
@@ -119,7 +156,7 @@ interface CollectedSlide {
 // The previous walker ran `svg.querySelector('section')` which grabbed only the "background"
 // section of a bg slide — empty of text, missing the <figure> — so background slides exported
 // with no text and no background. We now select the content/background sections explicitly.
-async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): Promise<SlideLayout[]> {
+export async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): Promise<SlideLayout[]> {
     return browserPage.evaluate(() => {
         const TEXT_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'LI', 'BLOCKQUOTE', 'TD', 'TH', 'PRE']);
         const SKIP_TAGS = new Set(['SCRIPT', 'STYLE']);
@@ -159,6 +196,10 @@ async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): 
             const secRect = contentSection.getBoundingClientRect();
             const contentStyle = getComputedStyle(contentSection);
             const background = contentStyle.backgroundColor;
+            const backgroundImage =
+                contentStyle.backgroundImage && contentStyle.backgroundImage !== 'none'
+                    ? contentStyle.backgroundImage
+                    : undefined;
             const color = contentStyle.color;
             const items: CollectedItem[] = [];
 
@@ -189,7 +230,12 @@ async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): 
 
             const walk = (node: Element): void => {
                 for (const child of Array.from(node.children)) {
-                    const tag = child.tagName;
+                    // SVG elements report a *lowercase* tagName ('svg', 'text'),
+                    // HTML elements an uppercase one ('IMG', 'DIV'). Normalizing to
+                    // uppercase makes the SVG branch below actually match inline
+                    // diagrams (locally rendered mermaid), which otherwise get
+                    // walked into and shattered into loose text items.
+                    const tag = child.tagName.toUpperCase();
                     if (SKIP_TAGS.has(tag)) continue;
 
                     if (tag === 'IMG' || tag === 'EMBED' || tag === 'SVG') {
@@ -222,8 +268,15 @@ async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): 
                             const r = child.getBoundingClientRect();
                             if (r.width > 0 && r.height > 0) {
                                 const cs = getComputedStyle(child);
+                                const textId = `export-el-${uid++}`;
+                                // Text items are tagged too: the decoration-layer pass
+                                // below hides every collected item before screenshotting
+                                // the slide, so their text lives only in the editable
+                                // overlay, never twice.
+                                child.setAttribute('data-export-id', textId);
                                 items.push({
                                     type: 'text',
+                                    id: textId,
                                     tag,
                                     text,
                                     x: r.left - secRect.left,
@@ -247,11 +300,51 @@ async function extractSlideLayouts(browserPage: import('puppeteer-core').Page): 
             };
 
             walk(contentSection);
-            slides.push({ width: w, height: h, background, color, items });
+            slides.push({ width: w, height: h, background, backgroundImage, color, items });
         }
 
         return slides;
     }) as Promise<SlideLayout[]>;
+}
+
+// Captures one full-slide "decoration layer" screenshot per slide with every
+// collected text/image item temporarily hidden (visibility:hidden keeps layout).
+// The result preserves all CSS painting the walker cannot express as pptx shapes —
+// card/tile backgrounds, rounded corners, borders, accent bars, ::before step
+// badges, gradients — while the editable text and diagram images are overlaid
+// afterwards at their original rects.
+export async function captureSlideBackgrounds(
+    page: import('puppeteer-core').Page,
+    layouts: SlideLayout[]
+): Promise<(string | undefined)[]> {
+    const svgHandles = await page.$$('svg[data-marpit-svg]');
+    const shots: (string | undefined)[] = [];
+
+    for (let i = 0; i < layouts.length && i < svgHandles.length; i++) {
+        const ids = layouts[i].items
+            .map((item) => item.id)
+            .filter((id): id is string => typeof id === 'string');
+
+        const setVisibility = (slideIds: string[], visibility: string) => {
+            for (const id of slideIds) {
+                const el = document.querySelector(`[data-export-id="${id}"]`) as HTMLElement | null;
+                if (el) el.style.visibility = visibility;
+            }
+        };
+
+        try {
+            await page.evaluate(setVisibility, ids, 'hidden');
+            const shot = await svgHandles[i].screenshot({ type: 'png' });
+            shots.push(`image/png;base64,${Buffer.from(shot).toString('base64')}`);
+        } catch (e) {
+            console.warn(`Marp Slides: failed to capture decoration layer for slide ${i + 1}.`, e);
+            shots.push(undefined);
+        } finally {
+            await page.evaluate(setVisibility, ids, '').catch(() => { /* best effort restore */ });
+        }
+    }
+
+    return shots;
 }
 
 export class EditablePptxExport {
@@ -305,21 +398,42 @@ export class EditablePptxExport {
 
         const markdownText = await app.vault.cachedRead(file);
         const processedMarkdown = filesTool.convertImageWikiLinks(markdownText, file, app);
-        const { processedMarkdown: mdSized, dimensionMap } = parseMermaidDimensions(processedMarkdown);
+
+        // Local mermaid mode: replace fences with pre-rendered inline SVG before
+        // the Marp conversion (mirrors the preview and CLI export paths).
+        let effectiveMarkdown = processedMarkdown;
+        if (this.settings.MermaidRenderMode === 'local') {
+            const { renderMermaidInMarkdown } = await import('./localMermaid');
+            const local = await renderMermaidInMarkdown(processedMarkdown, this.settings);
+            effectiveMarkdown = local.markdown;
+            local.failures.forEach((f) =>
+                console.warn(`Marp Slides: local mermaid render failed: ${f.message}\n${f.source}`)
+            );
+        }
+
+        const { processedMarkdown: mdSized, dimensionMap } = parseMermaidDimensions(effectiveMarkdown);
 
         const marp = createMarpInstance(this.settings);
 
         if (this.settings.ThemePath !== '') {
-            const themeContents = await Promise.all(
-                app.vault.getFiles()
-                    .filter((f) => f.parent?.path === normalizePath(this.settings.ThemePath))
-                    .map((f) => app.vault.cachedRead(f))
+            const themeFiles = app.vault.getFiles().filter(
+                (f) => f.parent?.path === normalizePath(this.settings.ThemePath) && f.extension === 'css'
             );
-            themeContents.forEach((content) => marp.themeSet.add(content));
+            for (const file of themeFiles) {
+                try {
+                    // `read`, not `cachedRead`: this can run moments after the user
+                    // last touched the theme CSS, and the vault's read cache for
+                    // that file is not guaranteed to have caught up yet.
+                    const content = await app.vault.read(file);
+                    marp.themeSet.add(content);
+                } catch (e) {
+                    console.warn(`Marp Slides: failed to load theme file ${file.path}; skipping.`, e);
+                }
+            }
         }
 
-        let { html, css } = marp.render(mdSized);
-        ({ html, css } = applyMermaidStyling(html, css, dimensionMap, this.settings.MermaidWidth, this.settings.MermaidHeight));
+        let { html, css, comments } = marp.render(mdSized);
+        ({ html, css } = applyMermaidStyling(html, css, dimensionMap, this.settings.MermaidWidth, this.settings.MermaidHeight, this.settings.KrokiServerUrl));
 
         const basePath = ((file.vault.adapter as FileSystemAdapter).getBasePath
             ? `file:///${(file.vault.adapter as FileSystemAdapter).getBasePath().replace(/\\/g, '/')}/${file.parent?.path ?? ''}/`
@@ -367,16 +481,47 @@ export class EditablePptxExport {
                 throw new Error('No slides were found while rendering the deck for editable export.');
             }
 
+            // Full-slide decoration layer: keeps every CSS-painted visual (cards,
+            // borders, gradients, step badges) under the editable text overlay.
+            const decorationLayers = await captureSlideBackgrounds(page, layouts);
+
             const pptx = new pptxgen();
             const layoutName = `${layouts[0].width}x${layouts[0].height}`;
             pptx.defineLayout({ name: layoutName, width: pxToIn(layouts[0].width), height: pxToIn(layouts[0].height) });
             pptx.layout = layoutName;
 
-            for (const layout of layouts) {
+            for (let slideIndex = 0; slideIndex < layouts.length; slideIndex++) {
+                const layout = layouts[slideIndex];
                 const slide = pptx.addSlide();
+
+                // Marp speaker notes: HTML comments in the markdown (`<!-- ... -->`),
+                // one array per slide, become PowerPoint presenter notes.
+                const slideNotes = (comments[slideIndex] ?? []).join('\n\n').trim();
+                if (slideNotes.length > 0) {
+                    slide.addNotes(slideNotes);
+                }
 
                 if (!isTransparent(layout.background)) {
                     slide.background = { color: rgbToHex(layout.background) };
+                } else {
+                    // Gradient-painted slides (dark title/divider pages) keep their
+                    // readability through the first colour stop of the gradient.
+                    const gradient = gradientFallbackColor(layout.background, layout.backgroundImage);
+                    if (gradient) {
+                        slide.background = { color: gradient };
+                    }
+                }
+
+                // Decoration layer goes in before any text/image item so the
+                // editable overlay renders on top of it.
+                if (decorationLayers[slideIndex]) {
+                    slide.addImage({
+                        data: decorationLayers[slideIndex],
+                        x: 0,
+                        y: 0,
+                        w: pxToIn(layout.width),
+                        h: pxToIn(layout.height),
+                    });
                 }
 
                 for (const item of layout.items) {
@@ -391,7 +536,7 @@ export class EditablePptxExport {
                             bold: parseInt(item.fontWeight, 10) >= 600 || item.fontWeight === 'bold',
                             italic: item.fontStyle === 'italic',
                             align: (item.textAlign === 'start' ? 'left' : item.textAlign === 'end' ? 'right' : item.textAlign) as 'left' | 'right' | 'center' | 'justify',
-                            fontFace: item.tag === 'PRE' ? 'Consolas' : undefined,
+                            fontFace: item.tag === 'PRE' ? 'Consolas' : firstFontFamily(item.fontFamily),
                             bullet: item.tag === 'LI' ? true : undefined,
                             valign: 'top',
                             margin: 0,

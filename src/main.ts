@@ -1,11 +1,12 @@
-import { MarkdownView, TAbstractFile, Plugin, addIcon, App, PluginSettingTab, Setting, EditorSuggest, EditorPosition, Editor, TFile, EditorSuggestTriggerInfo, EditorSuggestContext, debounce  } from 'obsidian';
+import { MarkdownView, TAbstractFile, Plugin, addIcon, App, PluginSettingTab, Setting, EditorSuggest, EditorPosition, Editor, TFile, EditorSuggestTriggerInfo, EditorSuggestContext, debounce, Notice } from 'obsidian';
 
 import { MARP_PREVIEW_VIEW, MarpPreviewView } from './views/marpPreviewView';
 import { MarpExport } from './utilities/marpExport';
 import { EditablePptxExport } from './utilities/editablePptxExport';
 import { ICON_SLIDE_PREVIEW, ICON_EXPORT_PDF, ICON_EXPORT_PPTX, ICON_SLIDE_PRESENT } from './utilities/icons';
 import { Libs } from './utilities/libs';
-import { MarpSlidesSettings, DEFAULT_SETTINGS } from 'utilities/settings';
+import { MarpSlidesSettings, DEFAULT_SETTINGS, MermaidRenderMode } from 'utilities/settings';
+import { testKrokiServer, normalizeKrokiUrl } from 'utilities/mermaid';
 
 
 export default class MarpSlides extends Plugin {
@@ -264,6 +265,48 @@ export class MarpSlidesSettingTab extends PluginSettingTab {
 					this.plugin.settings.EnableMarkdownItPlugins = value;
 					await this.plugin.saveSettings();
 				}));
+
+		new Setting(containerEl)
+			.setName('Mermaid Render Mode')
+			.setDesc('Local: render mermaid diagrams offline with the mermaid runtime bundled in this plugin (recommended, works without network). Kroki: send them to a Kroki server (edit and test the URL below). Applies to preview and all exports.')
+			.addDropdown(dropdown => dropdown
+				.addOption('local', 'Local (bundled mermaid, offline)')
+				.addOption('kroki', 'Kroki server (online)')
+				.setValue(this.plugin.settings.MermaidRenderMode)
+				.onChange(async (value) => {
+					this.plugin.settings.MermaidRenderMode = value as MermaidRenderMode;
+					await this.plugin.saveSettings();
+				}));
+
+		const krokiUrlSetting = new Setting(containerEl)
+			.setName('Kroki Server URL')
+			.setDesc('Base URL of the Kroki server used when Mermaid Render Mode is "Kroki" (e.g. https://kroki.io or a self-hosted instance).')
+			.addText(text => text
+				.setPlaceholder('https://kroki.io')
+				.setValue(this.plugin.settings.KrokiServerUrl)
+				.onChange(async (value) => {
+					this.plugin.settings.KrokiServerUrl = value;
+					await this.plugin.saveSettings();
+				}));
+
+		krokiUrlSetting.addButton(button => button
+			.setButtonText('Test')
+			.setCta()
+			.onClick(async () => {
+				const target = normalizeKrokiUrl(this.plugin.settings.KrokiServerUrl);
+				button.setDisabled(true);
+				new Notice(`Marp Slides: testing Kroki server ${target} ...`);
+				try {
+					const result = await testKrokiServer(target);
+					if (result.ok) {
+						new Notice(`Marp Slides: Kroki server OK — ${result.detail}`, 8000);
+					} else {
+						new Notice(`Marp Slides: Kroki server test failed — ${result.detail}`, 10000);
+					}
+				} finally {
+					button.setDisabled(false);
+				}
+			}));
 
 		new Setting(containerEl)
 			.setName('Mermaid Default Width')
