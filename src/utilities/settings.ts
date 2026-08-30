@@ -15,6 +15,7 @@ export interface MarpSlidesSettings {
 	KrokiServerUrl: string;
 	MermaidWidth: string;
 	MermaidHeight: string;
+	MermaidFontFamily: string;
 	SlideRatio: SlideRatio;
 	CodeTheme: CodeTheme;
 	MermaidTheme: MermaidTheme;
@@ -36,6 +37,11 @@ export const DEFAULT_SETTINGS: MarpSlidesSettings = {
 	KrokiServerUrl: 'https://kroki.io',
 	MermaidWidth: '',
 	MermaidHeight: '',
+	// Font mermaid uses to BOTH measure and draw diagram labels. Kept to fonts
+	// installed system-wide (no web font) so the measurement done while
+	// pre-rendering matches the metrics the export browser later paints with —
+	// a mismatch is what makes CJK labels overflow / clip their node boxes.
+	MermaidFontFamily: '"Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Heiti SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif',
 	// Deck-level defaults; each can be overridden per note via the `marp-slides`
 	// frontmatter block (see utilities/deckConfig.ts).
 	SlideRatio: '16:9',

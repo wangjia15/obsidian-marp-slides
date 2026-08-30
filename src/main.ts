@@ -363,6 +363,17 @@ export class MarpSlidesSettingTab extends PluginSettingTab {
 					this.plugin.settings.MermaidHeight = value;
 					await this.plugin.saveSettings();
 				}));
+
+		new Setting(containerEl)
+			.setName('Mermaid Font Family')
+			.setDesc('Font used to both measure and draw Mermaid labels (local render mode). Use a font installed on this machine — not a web font — so labels do not overflow/clip their boxes. Leave empty for Mermaid’s default.')
+			.addText(text => text
+				.setPlaceholder('"Microsoft YaHei", "PingFang SC", sans-serif')
+				.setValue(this.plugin.settings.MermaidFontFamily)
+				.onChange(async (value) => {
+					this.plugin.settings.MermaidFontFamily = value;
+					await this.plugin.saveSettings();
+				}));
 	}
 }
 

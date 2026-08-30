@@ -10,6 +10,7 @@ import { createMarpInstance } from '../utilities/marpInstance';
 import { parseMermaidDimensions, applyMermaidStyling } from '../utilities/mermaid';
 import { resolveDeckConfig, injectSizeDirective, ensureSizeMeta, injectMermaidInitTheme } from '../utilities/deckConfig';
 import { buildCodeThemeCss } from '../utilities/codeThemes';
+import { transformCallouts, hasCallouts, buildCalloutCss } from '../utilities/callouts';
 
 export const MARP_PREVIEW_VIEW = 'marp-preview-view';
 
@@ -211,13 +212,17 @@ export class MarpPreviewView extends ItemView  {
 
             // Re-rendering is expensive (full Marp render + innerHTML swap); skip when
             // nothing that affects the output has changed.
-            const renderKey = `${basePath}|${this.settings.MermaidRenderMode}|${this.settings.KrokiServerUrl}|${this.settings.MermaidWidth}|${this.settings.MermaidHeight}|${deckConfig.ratio}|${deckConfig.codeTheme}|${deckConfig.mermaidTheme}|${markdownText}`;
+            const renderKey = `${basePath}|${this.settings.MermaidRenderMode}|${this.settings.KrokiServerUrl}|${this.settings.MermaidWidth}|${this.settings.MermaidHeight}|${this.settings.MermaidFontFamily}|${deckConfig.ratio}|${deckConfig.codeTheme}|${deckConfig.mermaidTheme}|${markdownText}`;
             if (renderKey === this.lastRenderedKey) {
                 return;
             }
 
-            // Convert wiki-link images to standard markdown
-            let processedMarkdown = filePath.convertImageWikiLinks(markdownText, view.file, this.app);
+            // Normalise every image embed (wiki + Markdown syntax, Obsidian size
+            // hints) into a form Marp renders correctly.
+            let processedMarkdown = filePath.convertImages(markdownText, view.file, this.app);
+
+            // Rewrite Obsidian callouts (`> [!note]`) into styled HTML blocks.
+            processedMarkdown = transformCallouts(processedMarkdown);
 
             // Ratio: inject the resolved size as a Marp directive (no-op when the
             // deck already pins `size` itself) and, for kroki-rendered diagrams,
@@ -248,6 +253,9 @@ export class MarpPreviewView extends ItemView  {
             let { html, css } = this.marp.render(mdSized);
             ({ html, css } = applyMermaidStyling(html, css, dimensionMap, this.settings.MermaidWidth, this.settings.MermaidHeight, this.settings.KrokiServerUrl));
             css += buildCodeThemeCss(deckConfig.codeTheme);
+            if (hasCallouts(processedMarkdown)) {
+                css += buildCalloutCss();
+            }
             
             // Replace Backgorund Url for images
             html = html.replace(/(?!background-image:url\(&quot;http)background-image:url\(&quot;/g, `background-image:url(&quot;${basePath}`);

@@ -9,6 +9,7 @@ import { tryAcquireExportLock, releaseExportLock } from './exportLock';
 import { extractMermaidDiagrams, buildKrokiUrl, normalizeKrokiUrl } from './mermaid';
 import { resolveDeckConfig, injectSizeDirective, ensureSizeMeta, injectMermaidInitTheme, DeckConfig } from './deckConfig';
 import { buildCodeThemeCss } from './codeThemes';
+import { transformCallouts, hasCallouts, buildCalloutCss, CALLOUT_HTML_ALLOWLIST } from './callouts';
 import { writeFileSync, readFileSync, existsSync, copySync, removeSync, readdirSync } from 'fs-extra';
 
 export class MarpCLIError extends Error {}
@@ -50,10 +51,20 @@ interface EngineConfigSpec {
     pluginsEnabled: boolean;
     krokiUrl: string;
     extraCss: string;
+    // Enable a narrow div/p/span HTML allowlist so Obsidian callouts render
+    // without `--html` opting the whole deck into raw HTML. Ignored when the
+    // deck is already exported with `--html` (full passthrough wins).
+    calloutHtml: boolean;
 }
 
 function buildEngineConfig(spec: EngineConfigSpec): string {
     const lines: string[] = ['module.exports = ({ marp }) => {'];
+
+    if (spec.calloutHtml) {
+        lines.push(
+            `  marp.markdown.set({ html: ${JSON.stringify(CALLOUT_HTML_ALLOWLIST)} });`
+        );
+    }
 
     if (spec.extraCss !== '') {
         // Hook the instance's render to append our CSS after the theme CSS, so
@@ -187,7 +198,7 @@ export class MarpExport {
             // Convert wiki-link images to standard markdown before export
             if (this.app) {
                 try {
-                    const processedContent = filesTool.convertImageWikiLinks(originalOnDisk ?? '', file, this.app);
+                    const processedContent = filesTool.convertImages(originalOnDisk ?? '', file, this.app);
                     writeFileSync(completeFilePath, processedContent, 'utf-8');
                 } catch (e) {
                     console.error('Failed to process wiki-links for export:', e);
@@ -211,13 +222,20 @@ export class MarpExport {
             if (this.settings.MermaidRenderMode === 'kroki') {
                 stagedMarkdown = injectMermaidInitTheme(stagedMarkdown, deckConfig.mermaidTheme);
             }
+            // Rewrite Obsidian callouts (`> [!note]`) into styled HTML blocks.
+            const deckHasCallouts = hasCallouts(stagedMarkdown);
+            if (deckHasCallouts) {
+                stagedMarkdown = transformCallouts(stagedMarkdown);
+            }
             if (stagedMarkdown !== originalOnDisk) {
                 writeFileSync(completeFilePath, stagedMarkdown, 'utf-8');
             }
 
             // Code highlight theme has no CLI flag; it rides along through the
-            // engine config, which appends the CSS to every rendered deck.
-            const extraCss = buildCodeThemeCss(deckConfig.codeTheme);
+            // engine config, which appends the CSS to every rendered deck. The
+            // callout CSS goes the same way when the deck uses callouts.
+            const extraCss = buildCodeThemeCss(deckConfig.codeTheme) +
+                (deckHasCallouts ? buildCalloutCss() : '');
 
             const argv: string[] = [completeFilePath,'--allow-local-files'];
             //const argv: string[] = ['--engine', '@marp-team/marp-core', completeFilePath,'--allow-local-files'];
@@ -236,17 +254,25 @@ export class MarpExport {
             // config is missing (offline install, blocked download), fall back to
             // the default engine instead of aborting the whole export with
             // "The specified engine has not resolved".
-            const needsEngine = this.settings.EnableMarkdownItPlugins || extraCss !== '';
+            // `--html` (full passthrough) makes the callout allowlist redundant.
+            const calloutHtml = deckHasCallouts && !this.settings.EnableHTML && !localMermaid;
+            const needsEngine = this.settings.EnableMarkdownItPlugins || extraCss !== '' || calloutHtml;
             if (needsEngine && existsSync(marpEngineConfig)){
                 syncEngineConfig(marpEngineConfig, {
                     pluginsEnabled: this.settings.EnableMarkdownItPlugins,
                     krokiUrl: this.settings.KrokiServerUrl,
-                    extraCss
+                    extraCss,
+                    calloutHtml
                 });
                 argv.push('--engine');
                 argv.push(marpEngineConfig);
             } else if (needsEngine) {
-                console.warn(`Marp Slides: engine config not found at ${marpEngineConfig}; exporting with the default engine (${this.settings.EnableMarkdownItPlugins ? 'Markdown-It plugins' : 'code highlight theme'} disabled).`);
+                console.warn(`Marp Slides: engine config not found at ${marpEngineConfig}; exporting with the default engine (${this.settings.EnableMarkdownItPlugins ? 'Markdown-It plugins' : 'code highlight theme / callouts'} disabled).`);
+                // No engine available: fall back to full `--html` so at least the
+                // callout markup is not escaped into visible tags.
+                if (calloutHtml && !argv.includes('--html')) {
+                    argv.push('--html');
+                }
             }
 
             // Themes are passed as a patched copy in temp storage: custom theme

@@ -12,6 +12,7 @@ import { createMarpInstance } from './marpInstance';
 import { parseMermaidDimensions, applyMermaidStyling } from './mermaid';
 import { resolveDeckConfig, injectSizeDirective, ensureSizeMeta, injectMermaidInitTheme } from './deckConfig';
 import { buildCodeThemeCss } from './codeThemes';
+import { transformCallouts, hasCallouts, buildCalloutCss } from './callouts';
 import { rgbToHex, isTransparent, pxToIn, pxToPt } from './units';
 import { MarpCLIError } from './marpExport';
 
@@ -467,7 +468,8 @@ export class EditablePptxExport {
         if (completeFilePath === '') return;
 
         const markdownText = await app.vault.cachedRead(file);
-        const processedMarkdown = filesTool.convertImageWikiLinks(markdownText, file, app);
+        let processedMarkdown = filesTool.convertImages(markdownText, file, app);
+        processedMarkdown = transformCallouts(processedMarkdown);
 
         // Deck-level tuning (ratio / code theme / mermaid theme) resolved from the
         // note's frontmatter with the plugin settings as defaults, mirroring the
@@ -518,6 +520,9 @@ export class EditablePptxExport {
         let { html, css, comments } = marp.render(mdSized);
         ({ html, css } = applyMermaidStyling(html, css, dimensionMap, this.settings.MermaidWidth, this.settings.MermaidHeight, this.settings.KrokiServerUrl));
         css += buildCodeThemeCss(deckConfig.codeTheme);
+        if (hasCallouts(processedMarkdown)) {
+            css += buildCalloutCss();
+        }
 
         const basePath = ((file.vault.adapter as FileSystemAdapter).getBasePath
             ? `file:///${(file.vault.adapter as FileSystemAdapter).getBasePath().replace(/\\/g, '/')}/${file.parent?.path ?? ''}/`

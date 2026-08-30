@@ -18,28 +18,49 @@ import { MermaidTheme, resolveDeckConfig } from './deckConfig';
 type MermaidModule = typeof import('mermaid')['default'];
 
 let mermaidPromise: Promise<MermaidModule> | undefined;
-let initializedTheme = '';
+let initializedKey = '';
 
 // mermaid.initialize() is global and survives across calls, so re-running it is
-// the only way to switch themes once the runtime is loaded. It's cheap, but
-// skip it when the requested theme hasn't changed.
-function getMermaid(theme: MermaidTheme): Promise<MermaidModule> {
+// the only way to switch config once the runtime is loaded. It's cheap, but
+// skip it when nothing that affects the output changed.
+function mermaidConfig(theme: MermaidTheme, fontFamily: string) {
+    const font = fontFamily.trim();
+    return {
+        startOnLoad: false,
+        securityLevel: 'loose' as const,
+        theme,
+        // Measure and paint labels with the same explicitly named font. Left to
+        // its default ("trebuchet ms", verdana, arial), mermaid measures CJK
+        // labels in a Latin font — every glyph then falls back to a wider system
+        // font at paint time and overflows / clips its node box.
+        ...(font ? { fontFamily: font, themeVariables: { fontFamily: font } } : {}),
+        // htmlLabels wrap each label in a <foreignObject> sized to the measured
+        // width; any measurement drift (or a rasteriser that renders
+        // foreignObject poorly) then clips the text. Plain SVG <text> is sized
+        // from getBBox() (exact) and, being SVG text, is never clipped by its
+        // node box even if a little drift remains. Set at the root level as
+        // mermaid 11 wants; the per-diagram flag is deprecated but still honoured.
+        htmlLabels: false,
+        // padding kept at mermaid's default (15) plus a small margin, so a hair
+        // of cross-environment metric drift still lands inside the box.
+        flowchart: { htmlLabels: false, padding: 18, useMaxWidth: true },
+    };
+}
+
+function getMermaid(theme: MermaidTheme, fontFamily: string): Promise<MermaidModule> {
+    const key = `${theme}|${fontFamily}`;
     if (!mermaidPromise) {
         mermaidPromise = import('mermaid').then((m) => {
             const mermaid = m.default;
-            mermaid.initialize({
-                startOnLoad: false,
-                securityLevel: 'loose',
-                theme,
-            });
-            initializedTheme = theme;
+            mermaid.initialize(mermaidConfig(theme, fontFamily));
+            initializedKey = key;
             return mermaid;
         });
     }
     return mermaidPromise.then((mermaid) => {
-        if (initializedTheme !== theme) {
-            mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme });
-            initializedTheme = theme;
+        if (initializedKey !== key) {
+            mermaid.initialize(mermaidConfig(theme, fontFamily));
+            initializedKey = key;
         }
         return mermaid;
     });
@@ -47,8 +68,15 @@ function getMermaid(theme: MermaidTheme): Promise<MermaidModule> {
 
 let renderCounter = 0;
 
-async function renderMermaidToSvg(code: string, theme: MermaidTheme): Promise<string> {
-    const mermaid = await getMermaid(theme);
+async function renderMermaidToSvg(code: string, theme: MermaidTheme, fontFamily: string): Promise<string> {
+    const mermaid = await getMermaid(theme, fontFamily);
+    // Label boxes are sized from measured text: if a webfont is still loading
+    // when we render, the fallback metrics get baked into the SVG. Wait for
+    // fonts to settle first (best-effort; not every host exposes the API).
+    try {
+        const fonts = (globalThis as { document?: { fonts?: { ready?: Promise<unknown> } } }).document?.fonts;
+        if (fonts?.ready) await fonts.ready;
+    } catch { /* no font API available - proceed */ }
     const id = `marp-slides-mermaid-${Date.now()}-${renderCounter++}`;
     const { svg } = await mermaid.render(id, code);
     return svg;
@@ -122,7 +150,7 @@ export async function renderMermaidInMarkdown(
 
     const rendered = await Promise.all(matches.map(async (m) => {
         try {
-            const svg = await renderMermaidToSvg(m.code.trimEnd(), mermaidTheme);
+            const svg = await renderMermaidToSvg(m.code.trimEnd(), mermaidTheme, settings.MermaidFontFamily || '');
             const width =
                 m.attrs.match(/width\s*=\s*([^\s}]+)/)?.[1] || settings.MermaidWidth || '100%';
             // '%' resolves against the `.mermaid` wrapper's own box (a shrinkable flex
