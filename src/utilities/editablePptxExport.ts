@@ -15,6 +15,20 @@ import { buildCodeThemeCss } from './codeThemes';
 import { rgbToHex, isTransparent, pxToIn, pxToPt } from './units';
 import { MarpCLIError } from './marpExport';
 
+// One syntax-highlighted token inside a code block: highlight.js wraps each
+// token in its own `<span class="hljs-*">`, each with its own computed color
+// (and occasionally weight/style, e.g. italic comments or bold `hljs-strong`).
+// Rendering the whole `<pre>` as a single flat string+color (as every other
+// text item is) would flatten all of that into one color — this is what lets
+// a code block keep its per-token highlighting once rebuilt as pptxgenjs rich
+// text (an array of runs sharing one text box).
+interface CodeRun {
+    text: string;
+    color: string;
+    fontWeight: string;
+    fontStyle: string;
+}
+
 interface SlideTextItem {
     type: 'text';
     id: string;
@@ -34,6 +48,9 @@ interface SlideTextItem {
     fontStyle: string;
     textAlign: string;
     fontFamily: string;
+    // Present only for PRE (code) items with more than one differently-styled
+    // token; render as pptxgenjs rich text instead of `text`/`color` above.
+    codeRuns?: CodeRun[];
 }
 
 interface SlideImageItem {
@@ -91,6 +108,13 @@ export function firstFontFamily(fontFamily: string | undefined): string | undefi
     return first ? first : undefined;
 }
 
+// Same threshold pptxgenjs itself has no opinion on: computed font-weight is
+// either a keyword ('bold'/'normal') or a numeric string ('400', '700', ...),
+// and CSS treats >= 600 (semibold and up) as visually bold.
+function isBoldWeight(fontWeight: string): boolean {
+    return fontWeight === 'bold' || parseInt(fontWeight, 10) >= 600;
+}
+
 function resolveChromePath(settings: MarpSlidesSettings): string {
     if (settings.CHROME_PATH) return settings.CHROME_PATH;
     if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
@@ -138,6 +162,7 @@ interface CollectedTextItem {
     fontStyle: string;
     textAlign: string;
     fontFamily: string;
+    codeRuns?: CodeRun[];
 }
 interface CollectedImageItem {
     type: 'image';
@@ -172,6 +197,33 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
         const SKIP_TAGS = new Set(['SCRIPT', 'STYLE']);
         // Match a CSS url("...") value, tolerating quote/whitespace variants.
         const URL_RE = /^url\(\s*["']?(.*?)["']?\s*\)$/i;
+
+        // highlight.js wraps each syntax token in its own <span class="hljs-*">, each
+        // resolving its own computed color (and sometimes weight/style — italic
+        // comments, bold hljs-strong). Recursing over every text node and reading
+        // getComputedStyle() on its *immediate* parent captures each token's already
+        // browser-resolved final color, correctly handling nested spans too, without
+        // needing to reimplement the CSS cascade or know any hljs-* class names.
+        const collectCodeRuns = (node: Element): { text: string; color: string; fontWeight: string; fontStyle: string }[] => {
+            const runs: { text: string; color: string; fontWeight: string; fontStyle: string }[] = [];
+            for (const child of Array.from(node.childNodes)) {
+                if (child.nodeType === Node.TEXT_NODE) {
+                    const text = child.textContent ?? '';
+                    if (text.length === 0) continue;
+                    const parent = child.parentElement;
+                    const cs = parent ? getComputedStyle(parent) : null;
+                    runs.push({
+                        text,
+                        color: cs ? cs.color : 'rgb(0, 0, 0)',
+                        fontWeight: cs ? cs.fontWeight : 'normal',
+                        fontStyle: cs ? cs.fontStyle : 'normal',
+                    });
+                } else if (child.nodeType === Node.ELEMENT_NODE) {
+                    runs.push(...collectCodeRuns(child as Element));
+                }
+            }
+            return runs;
+        };
 
         const slides: CollectedSlide[] = [];
         const svgs = Array.from(document.querySelectorAll('svg[data-marpit-svg]')) as unknown as SVGSVGElement[];
@@ -284,6 +336,12 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                                 // the slide, so their text lives only in the editable
                                 // overlay, never twice.
                                 child.setAttribute('data-export-id', textId);
+                                // Code blocks: recover per-token highlight.js colors by
+                                // walking into <code> instead of flattening to one string
+                                // + one color (which would lose all syntax highlighting).
+                                const codeRuns = tag === 'PRE'
+                                    ? collectCodeRuns(child.querySelector('code') ?? child)
+                                    : undefined;
                                 items.push({
                                     type: 'text',
                                     id: textId,
@@ -300,6 +358,7 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                                     fontStyle: cs.fontStyle,
                                     textAlign: cs.textAlign,
                                     fontFamily: cs.fontFamily,
+                                    codeRuns: codeRuns && codeRuns.length > 0 ? codeRuns : undefined,
                                 });
                             }
                         }
@@ -559,24 +618,56 @@ export class EditablePptxExport {
                         const backgroundHex = !isTransparent(item.backgroundColor)
                             ? rgbToHex(item.backgroundColor)
                             : undefined;
+                        const fontFace = item.tag === 'PRE' ? 'Consolas' : firstFontFamily(item.fontFamily);
+                        const fontSize = Math.max(1, Math.round(pxToPt(item.fontSize)));
 
-                        slide.addText(item.text, {
+                        // Box-level options apply regardless of whether `text` below is a
+                        // plain string or an array of rich-text runs (position/size, fill,
+                        // alignment, bullet, and text-frame behavior all live here).
+                        const boxOptions = {
                             x: pxToIn(item.x),
                             y: pxToIn(item.y),
                             w: pxToIn(item.w),
                             h: pxToIn(item.h),
-                            fontSize: Math.max(1, Math.round(pxToPt(item.fontSize))),
-                            color: rgbToHex(item.color),
                             fill: backgroundHex ? { color: backgroundHex } : undefined,
-                            bold: parseInt(item.fontWeight, 10) >= 600 || item.fontWeight === 'bold',
-                            italic: item.fontStyle === 'italic',
                             align: (item.textAlign === 'start' ? 'left' : item.textAlign === 'end' ? 'right' : item.textAlign) as 'left' | 'right' | 'center' | 'justify',
-                            fontFace: item.tag === 'PRE' ? 'Consolas' : firstFontFamily(item.fontFamily),
                             bullet: item.tag === 'LI' ? true : undefined,
-                            valign: 'top',
+                            valign: 'top' as const,
                             margin: 0,
                             autoFit: false,
-                        });
+                        };
+
+                        if (item.codeRuns) {
+                            // Syntax-highlighted code: one run per highlight.js token, each
+                            // carrying its own color/weight/style so the highlighting
+                            // survives into the pptx (a plain string+color pair can only
+                            // ever paint one color for the whole block). fontSize/fontFace
+                            // must be repeated per run — pptxgenjs only inherits box-level
+                            // options onto a run when the run supplies no options object of
+                            // its own, and every run here does (for its color).
+                            slide.addText(
+                                item.codeRuns.map((run) => ({
+                                    text: run.text,
+                                    options: {
+                                        color: rgbToHex(run.color),
+                                        bold: isBoldWeight(run.fontWeight),
+                                        italic: run.fontStyle === 'italic',
+                                        fontSize,
+                                        fontFace,
+                                    },
+                                })),
+                                boxOptions
+                            );
+                        } else {
+                            slide.addText(item.text, {
+                                ...boxOptions,
+                                fontSize,
+                                fontFace,
+                                color: rgbToHex(item.color),
+                                bold: isBoldWeight(item.fontWeight),
+                                italic: item.fontStyle === 'italic',
+                            });
+                        }
                     } else {
                         // Background figures carry a source URL — embed the original image
                         // (full resolution) rather than a rasterized screenshot. Other image
