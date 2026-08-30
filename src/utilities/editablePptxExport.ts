@@ -23,6 +23,13 @@ interface SlideTextItem {
     x: number; y: number; w: number; h: number;
     fontSize: number;
     color: string;
+    // Raw computed `background-color` of the element itself (not inherited), e.g.
+    // a code panel's dark fill or a `<mark>` highlight. Rendered as the text box's
+    // own fill so it survives even though the element is hidden — like every other
+    // collected item — while the decoration layer is screenshotted (see
+    // captureSlideBackgrounds): that screenshot can never show it, because hiding
+    // is exactly what makes room for the editable overlay.
+    backgroundColor: string;
     fontWeight: string;
     fontStyle: string;
     textAlign: string;
@@ -126,6 +133,7 @@ interface CollectedTextItem {
     x: number; y: number; w: number; h: number;
     fontSize: number;
     color: string;
+    backgroundColor: string;
     fontWeight: string;
     fontStyle: string;
     textAlign: string;
@@ -287,6 +295,7 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                                     h: r.height,
                                     fontSize: parseFloat(cs.fontSize),
                                     color: cs.color,
+                                    backgroundColor: cs.backgroundColor,
                                     fontWeight: cs.fontWeight,
                                     fontStyle: cs.fontStyle,
                                     textAlign: cs.textAlign,
@@ -542,6 +551,15 @@ export class EditablePptxExport {
 
                 for (const item of layout.items) {
                     if (item.type === 'text') {
+                        // The element's own background (a code panel's dark fill, a
+                        // <mark> highlight, ...) is otherwise lost: it paints on the very
+                        // box that gets hidden for the decoration-layer screenshot (see
+                        // captureSlideBackgrounds), so it can only be recovered here, as
+                        // the text box's own fill.
+                        const backgroundHex = !isTransparent(item.backgroundColor)
+                            ? rgbToHex(item.backgroundColor)
+                            : undefined;
+
                         slide.addText(item.text, {
                             x: pxToIn(item.x),
                             y: pxToIn(item.y),
@@ -549,6 +567,7 @@ export class EditablePptxExport {
                             h: pxToIn(item.h),
                             fontSize: Math.max(1, Math.round(pxToPt(item.fontSize))),
                             color: rgbToHex(item.color),
+                            fill: backgroundHex ? { color: backgroundHex } : undefined,
                             bold: parseInt(item.fontWeight, 10) >= 600 || item.fontWeight === 'bold',
                             italic: item.fontStyle === 'italic',
                             align: (item.textAlign === 'start' ? 'left' : item.textAlign === 'end' ? 'right' : item.textAlign) as 'left' | 'right' | 'center' | 'justify',
@@ -602,7 +621,21 @@ export class EditablePptxExport {
             // Cleanup failures (e.g. Windows file locks on the Chrome temp profile) must
             // never mask the real error from the try block above.
             if (browser) {
-                try { await browser.close(); } catch (e) { console.warn('Failed to close Puppeteer browser.', e); }
+                // browser.close() has no built-in timeout and can hang indefinitely
+                // waiting for a Chrome process that never exits cleanly (an observed
+                // flake, especially on Windows). If this await never settled, doExport()
+                // would never return and the process-wide export lock (shared with the
+                // marp-cli PDF/PPTX/PNG/HTML path) would stay held forever, silently
+                // blocking every export until Obsidian restarts. Give up waiting after a
+                // few seconds instead — a leaked Chrome process is a far smaller problem
+                // than a stuck plugin.
+                await Promise.race([
+                    browser.close().catch((e) => console.warn('Failed to close Puppeteer browser.', e)),
+                    new Promise<void>((resolve) => setTimeout(() => {
+                        console.warn('Marp Slides: puppeteer browser.close() did not finish within 10s; continuing without waiting for it (its Chrome process may keep running in the background).');
+                        resolve();
+                    }, 10000)),
+                ]);
             }
             try { removeSync(tempHtmlPath); } catch (e) { console.warn('Failed to remove temp export HTML.', e); }
         }
