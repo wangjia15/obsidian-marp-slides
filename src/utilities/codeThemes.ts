@@ -123,20 +123,38 @@ const PALETTES: Record<Exclude<CodeTheme, 'auto'>, CodePalette> = {
 // Returns the CSS overriding code block colors for the chosen theme, scoped to
 // slide sections. 'auto' (the default) yields no CSS: the slide theme keeps
 // deciding how code looks, exactly as before this setting existed.
+//
+// Two hard-won cascade details:
+//   - Marpit scopes every generated rule under the container chain
+//     (`div#<id> > svg > foreignObject > section …`), where the container ID is
+//     ID-level specificity — and marp-cli's ID is generated per run. Plain
+//     source order or extra specificity can never reliably win against that,
+//     so every declaration is marked !important. Theme rules never use
+//     !important themselves, and "user picked a palette" is exactly the
+//     semantics importance is for.
+//   - Code panels may render as `<pre is="marp-pre">` or as the `marp-pre`
+//     custom element depending on the viewer, hence :is(pre, marp-pre).
 export function buildCodeThemeCss(theme: CodeTheme): string {
     const palette = PALETTES[theme as Exclude<CodeTheme, 'auto'>];
     if (!palette) return '';
 
+    const important = (declarations: string) =>
+        declarations.split(';')
+            .map((d) => d.trim())
+            .filter((d) => d !== '')
+            .map((d) => `${d} !important`)
+            .join(';');
+
     const rules: string[] = [
-        `section pre{${palette.panel}}`,
-        'section pre code{color:inherit}'
+        `section :is(pre, marp-pre){${important(palette.panel)}}`,
+        `section :is(pre, marp-pre) code{${important('color:inherit')}}`
     ];
     for (const [selectors, declarations] of Object.entries(palette.tokens)) {
         const scoped = selectors
             .split(', ')
-            .map((s) => `section pre code ${s.startsWith('.') ? s : `.${s}`}`)
+            .map((s) => `section :is(pre, marp-pre) code ${s.startsWith('.') ? s : `.${s}`}`)
             .join(', ');
-        rules.push(`${scoped}{${declarations}}`);
+        rules.push(`${scoped}{${important(declarations)}}`);
     }
 
     return `/* marp-slides code theme: ${theme} */\n${rules.join('\n')}\n`;

@@ -161,12 +161,24 @@ describe('buildCodeThemeCss', () => {
     test('every other palette styles the code panel and tokens, scoped to sections', () => {
         for (const theme of ['github', 'github-dark', 'one-dark', 'monokai', 'dracula'] as const) {
             const css = buildCodeThemeCss(theme);
-            expect(css).toContain('section pre{');
-            expect(css).toContain('section pre code .hljs-keyword');
+            expect(css).toContain('section :is(pre, marp-pre){');
+            expect(css).toContain('section :is(pre, marp-pre) code .hljs-keyword');
             // every rule must be scoped to slide sections
             css.split('\n').filter((l) => l.includes('{')).forEach((rule) => {
                 expect(rule.startsWith('section ')).toBe(true);
             });
         }
+    });
+
+    test('declarations carry !important so they beat Marpit container-ID specificity', () => {
+        const css = buildCodeThemeCss('one-dark');
+        css.split('\n')
+            .filter((l) => l.includes('{'))
+            .forEach((rule) => {
+                const body = rule.slice(rule.indexOf('{') + 1, rule.lastIndexOf('}'));
+                body.split(';').filter((d) => d.trim() !== '').forEach((d) => {
+                    expect(d.trim().endsWith('!important')).toBe(true);
+                });
+            });
     });
 });
