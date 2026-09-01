@@ -29,12 +29,10 @@ interface SlideTextItem {
     // longer inflate or deflate the text relative to the browser render.
     lineHeight: number;
     color: string;
-    // Raw computed `background-color` of the element itself (not inherited), e.g.
-    // a code panel's dark fill or a `<mark>` highlight. Rendered as the text box's
-    // own fill so it survives even though the element is hidden — like every other
-    // collected item — while the decoration layer is screenshotted (see
-    // captureSlideBackgrounds): that screenshot can never show it, because hiding
-    // is exactly what makes room for the editable overlay.
+    // The element's own background, pre-composited to a solid when translucent.
+    // Used ONLY as the text-box fill when the decoration layer failed to capture;
+    // normally that layer paints it (with true translucency) because text items
+    // are transparentized — not hidden — during capture (see captureSlideBackgrounds).
     backgroundColor: string;
     fontWeight: string;
     fontStyle: string;
@@ -270,7 +268,7 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
         // formatting (a bold word, a link) from flattening into the paragraph's
         // single box-level style. <br> becomes a '\n' run that pptxgenjs turns
         // into a line break.
-        const collectInlineRuns = (node: Element): InlineRun[] => {
+        const collectInlineRuns = (node: Element, solidTextColor: (el: Element, cs: CSSStyleDeclaration) => string): InlineRun[] => {
             const runs: InlineRun[] = [];
             const collect = (current: Element): void => {
                 for (const child of Array.from(current.childNodes)) {
@@ -282,7 +280,7 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                         const bg = cs ? cs.backgroundColor : '';
                         runs.push({
                             text,
-                            color: cs ? cs.color : 'rgb(0, 0, 0)',
+                            color: parent && cs ? solidTextColor(parent, cs) : 'rgb(0, 0, 0)',
                             // A fully transparent background resolves to
                             // zero-alpha rgba() in Chrome; anything else (an
                             // inline <code> fill, <mark>) is kept as a highlight.
@@ -408,6 +406,51 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                 }
             }
 
+            // ── Colour algebra ──
+            // pptx text colours and fills are solid, but this deck's palette leans
+            // on translucency: rgba() text (lead/stage subtitles at .6–.82 alpha),
+            // 6%-navy tint badges, table-header washes. Every colour therefore
+            // resolves to its solid visual equivalent by compositing over the
+            // backdrop actually painted behind it — the ancestor chain's
+            // backgrounds over the slide background (white when the slide paints
+            // none).
+            type RGBA = [number, number, number, number];
+            const COLOR_RE = /rgba?\(\s*([\d.]+)\s*[, ]\s*([\d.]+)\s*[, ]\s*([\d.]+)(?:\s*[,/]\s*([\d.]+(?:%)?))?\s*\)/;
+            const parseColor = (value: string): RGBA | null => {
+                const m = COLOR_RE.exec(value || '');
+                if (!m) return null;
+                let alpha = m[4] === undefined ? 1 : parseFloat(m[4]);
+                if (m[4] && m[4].endsWith('%')) alpha = alpha / 100;
+                return [+m[1], +m[2], +m[3], alpha];
+            };
+            const fmtColor = (c: RGBA): string =>
+                `rgb(${Math.round(c[0])}, ${Math.round(c[1])}, ${Math.round(c[2])})`;
+            const blendOver = (fg: RGBA, bg: RGBA): RGBA => {
+                const a = fg[3];
+                return [fg[0] * a + bg[0] * (1 - a), fg[1] * a + bg[1] * (1 - a), fg[2] * a + bg[2] * (1 - a), 1];
+            };
+            // The opaque colour painted behind an element (its own background
+            // included when starting at the element itself).
+            const backdropOf = (el: Element | null): RGBA => {
+                let acc: RGBA = parseColor(background) ?? [255, 255, 255, 1];
+                const chain: Element[] = [];
+                let cur = el;
+                while (cur && cur !== contentSection) { chain.unshift(cur); cur = cur.parentElement; }
+                for (const anc of chain) {
+                    const c = parseColor(getComputedStyle(anc).backgroundColor);
+                    if (c) acc = blendOver(c, acc);
+                }
+                return acc;
+            };
+            // Solid equivalent of an element's text colour: its alpha — and the
+            // element's own opacity (e.g. .kpi .label) — composited over backdrop.
+            const solidTextColor = (el: Element, cs: CSSStyleDeclaration): string => {
+                let c = parseColor(cs.color) ?? [0, 0, 0, 1];
+                const op = parseFloat(cs.opacity);
+                if (!Number.isNaN(op) && op < 1) c = [c[0], c[1], c[2], c[3] * op];
+                return fmtColor(c[3] >= 1 ? c : blendOver(c, backdropOf(el)));
+            };
+
             const walk = (node: Element): void => {
                 for (const child of Array.from(node.children)) {
                     // SVG elements report a *lowercase* tagName ('svg', 'text'),
@@ -504,8 +547,16 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                                 // wrapper, where highlight.js wraps each token in
                                 // its own <span class="hljs-*">.
                                 const runs = collectInlineRuns(
-                                    tag === 'PRE' ? (child.querySelector('code') ?? child) : child
+                                    tag === 'PRE' ? (child.querySelector('code') ?? child) : child,
+                                    solidTextColor
                                 );
+                                // Fallback-only fill (used when the decoration layer
+                                // failed to capture): translucent backgrounds arrive
+                                // pre-composited to their solid visual equivalent.
+                                const bgParsed = parseColor(cs.backgroundColor);
+                                const solidBg = bgParsed && bgParsed[3] > 0 && bgParsed[3] < 1
+                                    ? fmtColor(blendOver(bgParsed, backdropOf(child.parentElement)))
+                                    : cs.backgroundColor;
                                 items.push({
                                     type: 'text',
                                     id: textId,
@@ -517,8 +568,8 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                                     h: r.height,
                                     fontSize: parseFloat(cs.fontSize),
                                     lineHeight: resolveLineHeight(cs),
-                                    color: cs.color,
-                                    backgroundColor: cs.backgroundColor,
+                                    color: solidTextColor(child, cs),
+                                    backgroundColor: solidBg,
                                     fontWeight: cs.fontWeight,
                                     fontStyle: cs.fontStyle,
                                     textAlign: cs.textAlign,
@@ -556,26 +607,40 @@ export async function captureSlideBackgrounds(
     const shots: (string | undefined)[] = [];
 
     for (let i = 0; i < layouts.length && i < svgHandles.length; i++) {
-        const ids = layouts[i].items
-            .map((item) => item.id)
-            .filter((id): id is string => typeof id === 'string');
+        const slideItems = layouts[i].items.map((item) => ({ id: item.id, type: item.type }));
 
-        const setVisibility = (slideIds: string[], visibility: string) => {
-            for (const id of slideIds) {
-                const el = document.querySelector(`[data-export-id="${id}"]`) as HTMLElement | null;
-                if (el) el.style.visibility = visibility;
+        // Text items are NOT hidden for this screenshot — only their glyphs are
+        // made transparent (with !important, so highlight.js token palettes
+        // don't win the cascade). Everything else the element paints stays in
+        // the decoration layer exactly as the browser showed it: the h1's gold
+        // underline, translucent badge/callout/table-header tints, rounded code
+        // panels — none of which a solid pptx fill or border can reproduce.
+        // Media/image items are overlaid as real objects and stay hidden.
+        const prepItems = (items: { id: string; type: string }[], mode: 'capture' | 'restore') => {
+            for (const it of items) {
+                const el = document.querySelector(`[data-export-id="${it.id}"]`) as HTMLElement | null;
+                if (!el) continue;
+                if (it.type === 'text') {
+                    const targets = [el, ...Array.from(el.querySelectorAll<HTMLElement>('*'))];
+                    for (const target of targets) {
+                        if (mode === 'capture') target.style.setProperty('color', 'transparent', 'important');
+                        else target.style.removeProperty('color');
+                    }
+                } else {
+                    el.style.visibility = mode === 'capture' ? 'hidden' : '';
+                }
             }
         };
 
         try {
-            await page.evaluate(setVisibility, ids, 'hidden');
+            await page.evaluate(prepItems, slideItems, 'capture');
             const shot = await svgHandles[i].screenshot({ type: 'png' });
             shots.push(`image/png;base64,${Buffer.from(shot).toString('base64')}`);
         } catch (e) {
             console.warn(`Marp Slides: failed to capture decoration layer for slide ${i + 1}.`, e);
             shots.push(undefined);
         } finally {
-            await page.evaluate(setVisibility, ids, '').catch(() => { /* best effort restore */ });
+            await page.evaluate(prepItems, slideItems, 'restore').catch(() => { /* best effort restore */ });
         }
     }
 
@@ -808,11 +873,13 @@ export class EditablePptxExport {
 
                 for (const item of layout.items) {
                     if (item.type === 'text') {
-                        // The element's own background (a code panel's dark fill, a
-                        // <mark> highlight, ...) is otherwise lost: it paints on the very
-                        // box that gets hidden for the decoration-layer screenshot (see
-                        // captureSlideBackgrounds), so it can only be recovered here, as
-                        // the text box's own fill.
+                        // Fallback fill for the rare case the decoration layer failed
+                        // to capture. Normally that layer already paints the element's
+                        // own background — a code panel's dark fill, a translucent
+                        // badge tint — with true translucency, which a solid pptx fill
+                        // cannot express; text is transparentized rather than hidden
+                        // during capture precisely so that painting survives. Translucent
+                        // colours arrive pre-composited (see solidTextColor).
                         const backgroundHex = !isTransparent(item.backgroundColor)
                             ? rgbToHex(item.backgroundColor)
                             : undefined;
@@ -828,7 +895,7 @@ export class EditablePptxExport {
                             y: pxToIn(item.y),
                             w: pxToIn(item.w),
                             h: pxToIn(item.h),
-                            fill: backgroundHex ? { color: backgroundHex } : undefined,
+                            fill: !decorationLayers[slideIndex] && backgroundHex ? { color: backgroundHex } : undefined,
                             valign: 'top' as const,
                             margin: 0,
                             fit: 'shrink' as const,
@@ -864,7 +931,9 @@ export class EditablePptxExport {
                                         // used to bias every size by up to half a point.
                                         fontSize: Math.max(1, pxToPt(run.fontSize)),
                                         fontFace,
-                                        highlight: run.backgroundColor ? rgbToHex(run.backgroundColor) : undefined,
+                                        // No run `highlight`: inline backgrounds are
+                                        // painted by the decoration layer (transparentized
+                                        // capture), and would only double-darken here.
                                         underline: run.underline ? { style: 'sng' as const } : undefined,
                                         // Only web links become pptx hyperlinks; vault-relative
                                         // hrefs would produce broken rels in PowerPoint.
