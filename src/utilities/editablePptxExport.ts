@@ -14,21 +14,8 @@ import { resolveDeckConfig, injectSizeDirective, ensureSizeMeta, injectMermaidIn
 import { buildCodeThemeCss } from './codeThemes';
 import { transformCallouts, hasCallouts, buildCalloutCss } from './callouts';
 import { rgbToHex, isTransparent, pxToIn, pxToPt } from './units';
+import { InlineRun, mergeInlineRuns } from './inlineRuns';
 import { MarpCLIError } from './marpExport';
-
-// One syntax-highlighted token inside a code block: highlight.js wraps each
-// token in its own `<span class="hljs-*">`, each with its own computed color
-// (and occasionally weight/style, e.g. italic comments or bold `hljs-strong`).
-// Rendering the whole `<pre>` as a single flat string+color (as every other
-// text item is) would flatten all of that into one color — this is what lets
-// a code block keep its per-token highlighting once rebuilt as pptxgenjs rich
-// text (an array of runs sharing one text box).
-interface CodeRun {
-    text: string;
-    color: string;
-    fontWeight: string;
-    fontStyle: string;
-}
 
 interface SlideTextItem {
     type: 'text';
@@ -37,6 +24,10 @@ interface SlideTextItem {
     text: string;
     x: number; y: number; w: number; h: number;
     fontSize: number;
+    // Used line-height in px (resolved, never the literal 'normal'). Feeds the
+    // pptxgenjs `lineSpacing` so PowerPoint's default single spacing can no
+    // longer inflate or deflate the text relative to the browser render.
+    lineHeight: number;
     color: string;
     // Raw computed `background-color` of the element itself (not inherited), e.g.
     // a code panel's dark fill or a `<mark>` highlight. Rendered as the text box's
@@ -49,9 +40,9 @@ interface SlideTextItem {
     fontStyle: string;
     textAlign: string;
     fontFamily: string;
-    // Present only for PRE (code) items with more than one differently-styled
-    // token; render as pptxgenjs rich text instead of `text`/`color` above.
-    codeRuns?: CodeRun[];
+    // Inline runs carrying per-stretch formatting (see inlineRuns.ts); rendered
+    // as pptxgenjs rich text instead of the flat `text`/`color` above.
+    runs?: InlineRun[];
 }
 
 interface SlideImageItem {
@@ -116,6 +107,12 @@ function isBoldWeight(fontWeight: string): boolean {
     return fontWeight === 'bold' || parseInt(fontWeight, 10) >= 600;
 }
 
+// Only http(s) links become pptx hyperlinks; a vault-relative href would end
+// up as a broken relationship target inside the exported file.
+function isHttpUrl(href: string | undefined): href is string {
+    return !!href && /^https?:\/\//i.test(href);
+}
+
 function resolveChromePath(settings: MarpSlidesSettings): string {
     if (settings.CHROME_PATH) return settings.CHROME_PATH;
     if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
@@ -157,13 +154,14 @@ interface CollectedTextItem {
     text: string;
     x: number; y: number; w: number; h: number;
     fontSize: number;
+    lineHeight: number;
     color: string;
     backgroundColor: string;
     fontWeight: string;
     fontStyle: string;
     textAlign: string;
     fontFamily: string;
-    codeRuns?: CodeRun[];
+    runs?: InlineRun[];
 }
 interface CollectedImageItem {
     type: 'image';
@@ -199,31 +197,86 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
         // Match a CSS url("...") value, tolerating quote/whitespace variants.
         const URL_RE = /^url\(\s*["']?(.*?)["']?\s*\)$/i;
 
-        // highlight.js wraps each syntax token in its own <span class="hljs-*">, each
-        // resolving its own computed color (and sometimes weight/style — italic
-        // comments, bold hljs-strong). Recursing over every text node and reading
-        // getComputedStyle() on its *immediate* parent captures each token's already
-        // browser-resolved final color, correctly handling nested spans too, without
-        // needing to reimplement the CSS cascade or know any hljs-* class names.
-        const collectCodeRuns = (node: Element): { text: string; color: string; fontWeight: string; fontStyle: string }[] => {
-            const runs: { text: string; color: string; fontWeight: string; fontStyle: string }[] = [];
-            for (const child of Array.from(node.childNodes)) {
-                if (child.nodeType === Node.TEXT_NODE) {
-                    const text = child.textContent ?? '';
-                    if (text.length === 0) continue;
-                    const parent = child.parentElement;
-                    const cs = parent ? getComputedStyle(parent) : null;
-                    runs.push({
-                        text,
-                        color: cs ? cs.color : 'rgb(0, 0, 0)',
-                        fontWeight: cs ? cs.fontWeight : 'normal',
-                        fontStyle: cs ? cs.fontStyle : 'normal',
-                    });
-                } else if (child.nodeType === Node.ELEMENT_NODE) {
-                    runs.push(...collectCodeRuns(child as Element));
+        // One run per text node, reading getComputedStyle() on the node's
+        // *immediate* parent: the browser has already resolved the CSS cascade
+        // (including nested spans — highlight.js tokens, <strong>, <a>, inline
+        // <code>), so each run carries its final color/weight/style/size without
+        // reimplementing any CSS logic here. This generalizes the old code-only
+        // collector to every text item, which is what keeps mixed inline
+        // formatting (a bold word, a link) from flattening into the paragraph's
+        // single box-level style. <br> becomes a '\n' run that pptxgenjs turns
+        // into a line break.
+        const collectInlineRuns = (node: Element): InlineRun[] => {
+            const runs: InlineRun[] = [];
+            const collect = (current: Element): void => {
+                for (const child of Array.from(current.childNodes)) {
+                    if (child.nodeType === Node.TEXT_NODE) {
+                        const text = child.textContent ?? '';
+                        if (text.length === 0) continue;
+                        const parent = child.parentElement;
+                        const cs = parent ? getComputedStyle(parent) : null;
+                        const bg = cs ? cs.backgroundColor : '';
+                        runs.push({
+                            text,
+                            color: cs ? cs.color : 'rgb(0, 0, 0)',
+                            // A fully transparent background resolves to
+                            // zero-alpha rgba() in Chrome; anything else (an
+                            // inline <code> fill, <mark>) is kept as a highlight.
+                            backgroundColor: bg && bg !== 'rgba(0, 0, 0, 0)' ? bg : undefined,
+                            fontWeight: cs ? cs.fontWeight : 'normal',
+                            fontStyle: cs ? cs.fontStyle : 'normal',
+                            fontSize: cs ? parseFloat(cs.fontSize) || 16 : 16,
+                            underline: !!cs && (cs.textDecorationLine || '').includes('underline'),
+                            href: parent?.closest('a')?.getAttribute('href') || undefined,
+                        });
+                    } else if (child.nodeType === Node.ELEMENT_NODE) {
+                        const el = child as Element;
+                        if (el.tagName.toUpperCase() === 'BR') {
+                            runs.push({ text: '\n', color: 'rgb(0, 0, 0)', fontWeight: 'normal', fontStyle: 'normal', fontSize: 16 });
+                        } else {
+                            collect(el);
+                        }
+                    }
                 }
-            }
+            };
+            collect(node);
             return runs;
+        };
+
+        // Chrome resolves numeric/length line-heights to their used px value in
+        // getComputedStyle, but `line-height: normal` stays the literal string
+        // because its used value depends on font metrics. Measure a hidden
+        // one-line probe with the same font: a block's single-line height *is*
+        // the used line-height. `line-height: normal` must be set explicitly on
+        // the probe — it is an inherited property, so the slide's own setting
+        // would otherwise leak in and defeat the measurement. Cached per font
+        // signature; a deck typically uses only a handful.
+        const lineHeightCache = new Map<string, number>();
+        const resolveLineHeight = (cs: CSSStyleDeclaration): number => {
+            const px = parseFloat(cs.lineHeight);
+            if (!Number.isNaN(px) && px > 0) return px;
+
+            const key = `${cs.fontFamily}|${cs.fontSize}|${cs.fontWeight}|${cs.fontStyle}`;
+            const cached = lineHeightCache.get(key);
+            if (cached !== undefined) return cached;
+
+            const probe = document.createElement('span');
+            probe.textContent = 'Xg';
+            probe.style.position = 'absolute';
+            probe.style.visibility = 'hidden';
+            probe.style.whiteSpace = 'pre';
+            probe.style.lineHeight = 'normal';
+            probe.style.fontFamily = cs.fontFamily;
+            probe.style.fontSize = cs.fontSize;
+            probe.style.fontWeight = cs.fontWeight;
+            probe.style.fontStyle = cs.fontStyle;
+            document.body.appendChild(probe);
+            const measured = probe.getBoundingClientRect().height;
+            probe.remove();
+
+            const value = measured > 0 ? measured : parseFloat(cs.fontSize) * 1.2;
+            lineHeightCache.set(key, value);
+            return value;
         };
 
         const slides: CollectedSlide[] = [];
@@ -337,12 +390,13 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                                 // the slide, so their text lives only in the editable
                                 // overlay, never twice.
                                 child.setAttribute('data-export-id', textId);
-                                // Code blocks: recover per-token highlight.js colors by
-                                // walking into <code> instead of flattening to one string
-                                // + one color (which would lose all syntax highlighting).
-                                const codeRuns = tag === 'PRE'
-                                    ? collectCodeRuns(child.querySelector('code') ?? child)
-                                    : undefined;
+                                // Every text item carries inline runs (per-stretch
+                                // formatting); code blocks walk into their <code>
+                                // wrapper, where highlight.js wraps each token in
+                                // its own <span class="hljs-*">.
+                                const runs = collectInlineRuns(
+                                    tag === 'PRE' ? (child.querySelector('code') ?? child) : child
+                                );
                                 items.push({
                                     type: 'text',
                                     id: textId,
@@ -353,13 +407,14 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                                     w: r.width,
                                     h: r.height,
                                     fontSize: parseFloat(cs.fontSize),
+                                    lineHeight: resolveLineHeight(cs),
                                     color: cs.color,
                                     backgroundColor: cs.backgroundColor,
                                     fontWeight: cs.fontWeight,
                                     fontStyle: cs.fontStyle,
                                     textAlign: cs.textAlign,
                                     fontFamily: cs.fontFamily,
-                                    codeRuns: codeRuns && codeRuns.length > 0 ? codeRuns : undefined,
+                                    runs: runs.length > 0 ? runs : undefined,
                                 });
                             }
                         }
@@ -624,41 +679,58 @@ export class EditablePptxExport {
                             ? rgbToHex(item.backgroundColor)
                             : undefined;
                         const fontFace = item.tag === 'PRE' ? 'Consolas' : firstFontFamily(item.fontFamily);
-                        const fontSize = Math.max(1, Math.round(pxToPt(item.fontSize)));
 
-                        // Box-level options apply regardless of whether `text` below is a
-                        // plain string or an array of rich-text runs (position/size, fill,
-                        // alignment, bullet, and text-frame behavior all live here).
+                        // Text-frame options. `fit: 'shrink'` (replacing the deprecated
+                        // `autoFit: false`, which wrote no autofit element at all) is the
+                        // overflow safety net: if the viewer substitutes a font whose
+                        // metrics run taller than the browser's, PowerPoint shrinks the
+                        // text instead of spilling it over the box.
                         const boxOptions = {
                             x: pxToIn(item.x),
                             y: pxToIn(item.y),
                             w: pxToIn(item.w),
                             h: pxToIn(item.h),
                             fill: backgroundHex ? { color: backgroundHex } : undefined,
-                            align: (item.textAlign === 'start' ? 'left' : item.textAlign === 'end' ? 'right' : item.textAlign) as 'left' | 'right' | 'center' | 'justify',
-                            bullet: item.tag === 'LI' ? true : undefined,
                             valign: 'top' as const,
                             margin: 0,
-                            autoFit: false,
+                            fit: 'shrink' as const,
                         };
 
-                        if (item.codeRuns) {
-                            // Syntax-highlighted code: one run per highlight.js token, each
-                            // carrying its own color/weight/style so the highlighting
-                            // survives into the pptx (a plain string+color pair can only
-                            // ever paint one color for the whole block). fontSize/fontFace
-                            // must be repeated per run — pptxgenjs only inherits box-level
-                            // options onto a run when the run supplies no options object of
-                            // its own, and every run here does (for its color).
+                        // Paragraph-level options. pptxgenjs only inherits box-level
+                        // options into a rich-text run when that run carries no options
+                        // object of its own — and every run below does (for its color) —
+                        // so these MUST be repeated on each run or they would silently
+                        // drop for run-based text (all of it, now). `lineSpacing` carries
+                        // the browser's used line-height (px→pt at the fixed 96 dpi slide
+                        // scale) so PowerPoint's default single spacing can no longer
+                        // inflate the text relative to the preview — the main source of
+                        // overflowing/overlapping text boxes.
+                        const paragraphOptions = {
+                            align: (item.textAlign === 'start' ? 'left' : item.textAlign === 'end' ? 'right' : item.textAlign) as 'left' | 'right' | 'center' | 'justify',
+                            bullet: item.tag === 'LI' ? true : undefined,
+                            lineSpacing: item.lineHeight > 0 ? pxToPt(item.lineHeight) : undefined,
+                        };
+
+                        const runs = item.runs ? mergeInlineRuns(item.runs) : [];
+                        if (runs.length > 0) {
                             slide.addText(
-                                item.codeRuns.map((run) => ({
+                                runs.map((run) => ({
                                     text: run.text,
                                     options: {
+                                        ...paragraphOptions,
                                         color: rgbToHex(run.color),
                                         bold: isBoldWeight(run.fontWeight),
                                         italic: run.fontStyle === 'italic',
-                                        fontSize,
+                                        // Exact fractional points (pptxgenjs stores
+                                        // 1/100 pt internally) — the integer rounding
+                                        // used to bias every size by up to half a point.
+                                        fontSize: Math.max(1, pxToPt(run.fontSize)),
                                         fontFace,
+                                        highlight: run.backgroundColor ? rgbToHex(run.backgroundColor) : undefined,
+                                        underline: run.underline ? { style: 'sng' as const } : undefined,
+                                        // Only web links become pptx hyperlinks; vault-relative
+                                        // hrefs would produce broken rels in PowerPoint.
+                                        hyperlink: isHttpUrl(run.href) ? { url: run.href } : undefined,
                                     },
                                 })),
                                 boxOptions
@@ -666,7 +738,8 @@ export class EditablePptxExport {
                         } else {
                             slide.addText(item.text, {
                                 ...boxOptions,
-                                fontSize,
+                                ...paragraphOptions,
+                                fontSize: Math.max(1, pxToPt(item.fontSize)),
                                 fontFace,
                                 color: rgbToHex(item.color),
                                 bold: isBoldWeight(item.fontWeight),
