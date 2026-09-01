@@ -550,6 +550,18 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                                     tag === 'PRE' ? (child.querySelector('code') ?? child) : child,
                                     solidTextColor
                                 );
+                                // Place the text box at the element's CONTENT box.
+                                // The decoration layer already paints the element's
+                                // own padding and border (a blockquote's accent bar,
+                                // a code panel's chrome, table cell walls), and the
+                                // pptx box has no internal margin — text placed at
+                                // the border-box rect would hug the panel edge in a
+                                // way the browser never showed it.
+                                const edgeWidth = (prop: string) => parseFloat((cs as unknown as Record<string, string>)[prop]) || 0;
+                                const insetLeft = edgeWidth('paddingLeft') + edgeWidth('borderLeftWidth');
+                                const insetTop = edgeWidth('paddingTop') + edgeWidth('borderTopWidth');
+                                const insetRight = edgeWidth('paddingRight') + edgeWidth('borderRightWidth');
+                                const insetBottom = edgeWidth('paddingBottom') + edgeWidth('borderBottomWidth');
                                 // Fallback-only fill (used when the decoration layer
                                 // failed to capture): translucent backgrounds arrive
                                 // pre-composited to their solid visual equivalent.
@@ -562,10 +574,10 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                                     id: textId,
                                     tag,
                                     text,
-                                    x: r.left - secRect.left,
-                                    y: r.top - secRect.top,
-                                    w: r.width,
-                                    h: r.height,
+                                    x: r.left - secRect.left + insetLeft,
+                                    y: r.top - secRect.top + insetTop,
+                                    w: Math.max(1, r.width - insetLeft - insetRight),
+                                    h: Math.max(1, r.height - insetTop - insetBottom),
                                     fontSize: parseFloat(cs.fontSize),
                                     lineHeight: resolveLineHeight(cs),
                                     color: solidTextColor(child, cs),
@@ -748,6 +760,19 @@ export class EditablePptxExport {
 
         let { html, css, comments } = marp.render(mdSized);
         ({ html, css } = applyMermaidStyling(html, css, dimensionMap, this.settings.MermaidWidth, this.settings.MermaidHeight, this.settings.KrokiServerUrl));
+
+        // The temp page is a real document load, so <script> blocks inside the
+        // deck RUN here — unlike the preview, which injects the same HTML via
+        // innerHTML and never executes them. A deck-level mermaid CDN fallback
+        // (`mermaid.initialize({ startOnLoad: true })` scanning `.mermaid`)
+        // then REPLACES the locally pre-rendered SVG with its own re-render of
+        // the svg source, racing the walker: the collected item's element is
+        // destroyed before its screenshot and the diagram silently vanishes
+        // from the deck. The plugin always renders diagrams itself (local or
+        // kroki), so deck scripts are redundant in the export page at best and
+        // destructive at worst — strip them, which also makes the export match
+        // what the preview shows and keeps page.goto from waiting on the CDN.
+        html = html.replace(/<script\b[\s\S]*?<\/script\s*>/gi, '');
         css += buildCodeThemeCss(deckConfig.codeTheme);
         if (hasCallouts(processedMarkdown)) {
             css += buildCalloutCss();
@@ -826,7 +851,13 @@ export class EditablePptxExport {
                 imgItem: { id: string; x: number; y: number; w: number; h: number }
             ): Promise<void> => {
                 const el = await page.$(`[data-export-id="${imgItem.id}"]`);
-                if (!el) return;
+                if (!el) {
+                    // Never silent: a vanished element means something mutated
+                    // the DOM between extraction and screenshot (see the deck
+                    // <script> note above) and the image is being dropped.
+                    console.warn(`Marp Slides: element ${imgItem.id} disappeared before its screenshot; the image is skipped.`);
+                    return;
+                }
                 const shot = await el.screenshot({ type: 'png' });
                 slide.addImage({
                     data: `image/png;base64,${Buffer.from(shot).toString('base64')}`,
@@ -885,22 +916,6 @@ export class EditablePptxExport {
                             : undefined;
                         const fontFace = item.tag === 'PRE' ? 'Consolas' : firstFontFamily(item.fontFamily);
 
-                        // Text-frame options. `fit: 'shrink'` (replacing the deprecated
-                        // `autoFit: false`, which wrote no autofit element at all) is the
-                        // overflow safety net: if the viewer substitutes a font whose
-                        // metrics run taller than the browser's, PowerPoint shrinks the
-                        // text instead of spilling it over the box.
-                        const boxOptions = {
-                            x: pxToIn(item.x),
-                            y: pxToIn(item.y),
-                            w: pxToIn(item.w),
-                            h: pxToIn(item.h),
-                            fill: !decorationLayers[slideIndex] && backgroundHex ? { color: backgroundHex } : undefined,
-                            valign: 'top' as const,
-                            margin: 0,
-                            fit: 'shrink' as const,
-                        };
-
                         // Paragraph-level options. pptxgenjs only inherits box-level
                         // options into a rich-text run when that run carries no options
                         // object of its own — and every run below does (for its color) —
@@ -914,6 +929,44 @@ export class EditablePptxExport {
                             align: (item.textAlign === 'start' ? 'left' : item.textAlign === 'end' ? 'right' : item.textAlign) as 'left' | 'right' | 'center' | 'justify',
                             bullet: item.tag === 'LI' ? true : undefined,
                             lineSpacing: item.lineHeight > 0 ? pxToPt(item.lineHeight) : undefined,
+                        };
+
+                        // Wrap-safety margin. PowerPoint's font metrics (or a substitute
+                        // font) never match the browser's exactly, and a box whose width
+                        // IS the browser-measured text width — content-fit elements such
+                        // as inline-block badges and KPI labels — wraps its last
+                        // character the moment the substitute runs a hair wider, then
+                        // overflows the box. Give every text box ~1.5 characters of
+                        // breathing room, anchored per alignment so the text stays
+                        // exactly where the browser put it (left: grow right, right:
+                        // grow left, center: grow both).
+                        const wrapPad = Math.max(item.fontSize * 1.5, 12);
+                        let boxX = item.x;
+                        let boxW = item.w;
+                        if (paragraphOptions.align === 'center') {
+                            boxX -= wrapPad / 2;
+                            boxW += wrapPad;
+                        } else if (paragraphOptions.align === 'right') {
+                            boxX -= wrapPad;
+                            boxW += wrapPad;
+                        } else {
+                            boxW += wrapPad;
+                        }
+
+                        // Text-frame options. `fit: 'shrink'` (replacing the deprecated
+                        // `autoFit: false`, which wrote no autofit element at all) is the
+                        // overflow safety net: if the viewer substitutes a font whose
+                        // metrics run taller than the browser's, PowerPoint shrinks the
+                        // text instead of spilling it over the box.
+                        const boxOptions = {
+                            x: pxToIn(boxX),
+                            y: pxToIn(item.y),
+                            w: pxToIn(boxW),
+                            h: pxToIn(item.h),
+                            fill: !decorationLayers[slideIndex] && backgroundHex ? { color: backgroundHex } : undefined,
+                            valign: 'top' as const,
+                            margin: 0,
+                            fit: 'shrink' as const,
                         };
 
                         const runs = item.runs ? mergeInlineRuns(item.runs) : [];
