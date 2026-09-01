@@ -54,7 +54,18 @@ interface SlideImageItem {
     url?: string;
 }
 
-type SlideItem = SlideTextItem | SlideImageItem;
+// A <video>/<audio> element: embedded into the pptx as real PowerPoint media
+// (playable) instead of a rasterized frame. `url` is the browser-resolved
+// absolute source (file:/// for the deck's vault-relative assets/... paths).
+interface SlideMediaItem {
+    type: 'media';
+    id: string;
+    mediaType: 'video' | 'audio';
+    url: string;
+    x: number; y: number; w: number; h: number;
+}
+
+type SlideItem = SlideTextItem | SlideImageItem | SlideMediaItem;
 
 interface SlideLayout {
     width: number;
@@ -169,7 +180,14 @@ interface CollectedImageItem {
     x: number; y: number; w: number; h: number;
     url?: string;
 }
-type CollectedItem = CollectedTextItem | CollectedImageItem;
+interface CollectedMediaItem {
+    type: 'media';
+    id: string;
+    mediaType: 'video' | 'audio';
+    url: string;
+    x: number; y: number; w: number; h: number;
+}
+type CollectedItem = CollectedTextItem | CollectedImageItem | CollectedMediaItem;
 interface CollectedSlide {
     width: number;
     height: number;
@@ -354,19 +372,47 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                     const tag = child.tagName.toUpperCase();
                     if (SKIP_TAGS.has(tag)) continue;
 
-                    if (tag === 'IMG' || tag === 'EMBED' || tag === 'SVG') {
+                    if (tag === 'IMG' || tag === 'EMBED' || tag === 'SVG' || tag === 'VIDEO' || tag === 'AUDIO') {
                         const r = child.getBoundingClientRect();
-                        if (r.width > 0 && r.height > 0) {
+                        // <audio controls> renders a ~40px control bar, but a
+                        // control-less <audio> has no box at all — clamp instead of
+                        // dropping, so the clip still exports as playable media.
+                        const boxHeight = tag === 'AUDIO' && r.height === 0 ? 40 : r.height;
+                        if (r.width > 0 && boxHeight > 0) {
                             const id = `export-el-${uid++}`;
                             child.setAttribute('data-export-id', id);
-                            items.push({
-                                type: 'image',
-                                id,
-                                x: r.left - secRect.left,
-                                y: r.top - secRect.top,
-                                w: r.width,
-                                h: r.height,
-                            });
+                            // <video>/<audio> with a resolvable source become real
+                            // PowerPoint media rather than screenshots. The temp
+                            // document's <base href> resolves the deck's relative
+                            // `assets/...` paths to absolute file:/// URLs.
+                            const mediaSrc = tag === 'VIDEO' || tag === 'AUDIO'
+                                ? (child.getAttribute('src') ?? child.querySelector('source')?.getAttribute('src'))
+                                : null;
+                            let absUrl: string | null = null;
+                            if (mediaSrc) {
+                                try { absUrl = new URL(mediaSrc, document.baseURI).href; } catch { absUrl = null; }
+                            }
+                            if (absUrl) {
+                                items.push({
+                                    type: 'media',
+                                    id,
+                                    mediaType: tag === 'VIDEO' ? 'video' : 'audio',
+                                    url: absUrl,
+                                    x: r.left - secRect.left,
+                                    y: r.top - secRect.top,
+                                    w: r.width,
+                                    h: boxHeight,
+                                });
+                            } else {
+                                items.push({
+                                    type: 'image',
+                                    id,
+                                    x: r.left - secRect.left,
+                                    y: r.top - secRect.top,
+                                    w: r.width,
+                                    h: r.height,
+                                });
+                            }
                         }
                         continue;
                     }
@@ -378,7 +424,11 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                     // Kroki wraps diagrams in <p><embed/></p>; the media guard keeps those
                     // recursing so the embed is captured as an image node.
                     const isLeafText = child.children.length === 0;
-                    if ((TEXT_TAGS.has(tag) || isLeafText) && !child.querySelector('img, embed, svg')) {
+                    // The media guard must include video/audio: markdown-it wraps
+                    // inline raw HTML in <p>, and a <p><video/></p> whose textContent
+                    // is empty would otherwise be skipped here without ever
+                    // recursing into the video.
+                    if ((TEXT_TAGS.has(tag) || isLeafText) && !child.querySelector('img, embed, svg, video, audio')) {
                         const text = child.textContent ?? '';
                         if (text.trim().length > 0) {
                             const r = child.getBoundingClientRect();
@@ -634,6 +684,24 @@ export class EditablePptxExport {
             pptx.defineLayout({ name: layoutName, width: pxToIn(layouts[0].width), height: pxToIn(layouts[0].height) });
             pptx.layout = layoutName;
 
+            // Fallback for media items whose source cannot be embedded (unreadable
+            // file, remote URL): rasterize the element like any other image node.
+            const screenshotAsImage = async (
+                slide: ReturnType<pptxgen['addSlide']>,
+                imgItem: { id: string; x: number; y: number; w: number; h: number }
+            ): Promise<void> => {
+                const el = await page.$(`[data-export-id="${imgItem.id}"]`);
+                if (!el) return;
+                const shot = await el.screenshot({ type: 'png' });
+                slide.addImage({
+                    data: `image/png;base64,${Buffer.from(shot).toString('base64')}`,
+                    x: pxToIn(imgItem.x),
+                    y: pxToIn(imgItem.y),
+                    w: pxToIn(imgItem.w),
+                    h: pxToIn(imgItem.h),
+                });
+            };
+
             for (let slideIndex = 0; slideIndex < layouts.length; slideIndex++) {
                 const layout = layouts[slideIndex];
                 const slide = pptx.addSlide();
@@ -745,6 +813,56 @@ export class EditablePptxExport {
                                 bold: isBoldWeight(item.fontWeight),
                                 italic: item.fontStyle === 'italic',
                             });
+                        }
+                    } else if (item.type === 'media') {
+                        // <video>/<audio> embed as real PowerPoint media so they play
+                        // inside the deck instead of being baked into the decoration
+                        // layer as a static frame. Only local files can be embedded
+                        // (read → base64); anything else falls back to a screenshot.
+                        let embedded = false;
+                        if (item.url.startsWith('file://')) {
+                            try {
+                                const src = fileURLToPath(item.url);
+                                const ext = path.extname(src).toLowerCase().replace('.', '');
+                                const mime = item.mediaType === 'video'
+                                    ? (ext === 'webm' ? 'video/webm' : ext === 'mov' ? 'video/quicktime' : 'video/mp4')
+                                    : (ext === 'mp3' ? 'audio/mp3' : ext === 'm4a' || ext === 'mp4' ? 'audio/mp4' : 'audio/wav');
+                                // The video's first frame as it rendered in the browser,
+                                // replacing pptxgenjs's default gray play button. Best
+                                // effort — any failure just keeps the default cover.
+                                let cover: string | undefined;
+                                if (item.mediaType === 'video') {
+                                    try {
+                                        const el = await page.$(`[data-export-id="${item.id}"]`);
+                                        if (el) {
+                                            cover = `image/png;base64,${Buffer.from(await el.screenshot({ type: 'png' })).toString('base64')}`;
+                                        }
+                                    } catch (e) {
+                                        console.warn('Marp Slides: failed to capture media cover frame; using the default play button.', e);
+                                    }
+                                }
+                                slide.addMedia({
+                                    type: item.mediaType,
+                                    x: pxToIn(item.x),
+                                    y: pxToIn(item.y),
+                                    w: pxToIn(item.w),
+                                    h: pxToIn(item.h),
+                                    data: `${mime};base64,${readFileSync(src).toString('base64')}`,
+                                    // pptxgenjs derives the zip filename extension from the
+                                    // mime suffix ("quicktime", "mpeg") when extn is absent —
+                                    // the real file extension is what PowerPoint expects.
+                                    extn: ext || undefined,
+                                    ...(cover ? { cover } : {}),
+                                });
+                                embedded = true;
+                            } catch (e) {
+                                console.warn(`Marp Slides: failed to embed media source ${item.url}; falling back to a screenshot image.`, e);
+                            }
+                        } else {
+                            console.warn(`Marp Slides: media source ${item.url} is not a local file; falling back to a screenshot image.`);
+                        }
+                        if (!embedded) {
+                            await screenshotAsImage(slide, item);
                         }
                     } else {
                         // Background figures carry a source URL — embed the original image
