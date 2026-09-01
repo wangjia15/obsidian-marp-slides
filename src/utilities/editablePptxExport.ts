@@ -1,4 +1,4 @@
-import { App, TFile, Notice, normalizePath, FileSystemAdapter } from 'obsidian';
+import { App, TFile, Notice, normalizePath, FileSystemAdapter, requestUrl } from 'obsidian';
 import * as path from 'path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, readFileSync, writeFileSync, removeSync } from 'fs-extra';
@@ -122,6 +122,52 @@ function isBoldWeight(fontWeight: string): boolean {
 // up as a broken relationship target inside the exported file.
 function isHttpUrl(href: string | undefined): href is string {
     return !!href && /^https?:\/\//i.test(href);
+}
+
+// Raster formats PowerPoint can embed directly from a source file. Vector
+// sources (.svg) and anything unknown fall back to the screenshot path
+// (rendered by the browser, which handles them natively).
+const RASTER_IMAGE_MIME: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.bmp': 'image/bmp',
+};
+
+// Reads an image's source (local file or remote URL) and returns it as a
+// pptxgenjs data URL at FULL resolution — embedding the original file instead
+// of a DOM screenshot is what keeps images sharp when resized in PowerPoint.
+// Returns undefined whenever embedding is impossible or inadvisable, so the
+// caller falls back to a screenshot.
+async function readImageSource(url: string): Promise<string | undefined> {
+    const ext = path.extname(url.split('?')[0]).toLowerCase();
+    const mime = RASTER_IMAGE_MIME[ext];
+    if (!mime) return undefined;
+
+    if (url.startsWith('file://')) {
+        try {
+            return `${mime};base64,${readFileSync(fileURLToPath(url)).toString('base64')}`;
+        } catch (e) {
+            console.warn(`Marp Slides: failed to read image source ${url}; falling back to screenshot.`, e);
+            return undefined;
+        }
+    }
+
+    if (/^https?:\/\//i.test(url)) {
+        try {
+            // requestUrl (Obsidian) sidesteps the renderer's CORS restrictions.
+            const res = await requestUrl({ url });
+            if (res.status >= 400) throw new Error(`HTTP ${res.status}`);
+            return `${mime};base64,${Buffer.from(res.arrayBuffer).toString('base64')}`;
+        } catch (e) {
+            console.warn(`Marp Slides: failed to fetch remote image ${url}; falling back to screenshot.`, e);
+            return undefined;
+        }
+    }
+
+    return undefined;
 }
 
 function resolveChromePath(settings: MarpSlidesSettings): string {
@@ -404,9 +450,22 @@ export async function extractSlideLayouts(browserPage: import('puppeteer-core').
                                     h: boxHeight,
                                 });
                             } else {
+                                // <img> keeps its source URL so the original file can
+                                // be embedded at full resolution later — resizing in
+                                // PowerPoint then never pixelates. <embed>/inline <svg>
+                                // (and source-less media) have no raster source to
+                                // recover and stay on the screenshot path.
+                                let imgUrl: string | undefined;
+                                if (tag === 'IMG') {
+                                    const srcAttr = child.getAttribute('src');
+                                    if (srcAttr) {
+                                        try { imgUrl = new URL(srcAttr, document.baseURI).href; } catch { imgUrl = undefined; }
+                                    }
+                                }
                                 items.push({
                                     type: 'image',
                                     id,
+                                    url: imgUrl,
                                     x: r.left - secRect.left,
                                     y: r.top - secRect.top,
                                     w: r.width,
@@ -679,6 +738,17 @@ export class EditablePptxExport {
             // borders, gradients, step badges) under the editable text overlay.
             const decorationLayers = await captureSlideBackgrounds(page, layouts);
 
+            // Remaining element screenshots (source-less images, inline SVG / kroki
+            // diagrams, media cover frames) are captured at 2x device scale so they
+            // stay sharp when resized inside PowerPoint. Done AFTER the decoration
+            // layer on purpose: that layer is never resized by the user and a 2x
+            // version would only bloat the file (PNG bytes grow ~3-4x).
+            await page.setViewport({
+                width: layouts[0].width,
+                height: layouts[0].height,
+                deviceScaleFactor: 2,
+            });
+
             const pptx = new pptxgen();
             const layoutName = `${layouts[0].width}x${layouts[0].height}`;
             pptx.defineLayout({ name: layoutName, width: pxToIn(layouts[0].width), height: pxToIn(layouts[0].height) });
@@ -865,35 +935,23 @@ export class EditablePptxExport {
                             await screenshotAsImage(slide, item);
                         }
                     } else {
-                        // Background figures carry a source URL — embed the original image
-                        // (full resolution) rather than a rasterized screenshot. Other image
-                        // nodes (kroki embeds, inline <svg>) have no recoverable source, so
-                        // screenshot the rendered DOM element.
-                        let imageData: string | undefined;
-                        if (item.url) {
-                            try {
-                                const src = item.url.startsWith('file://') ? fileURLToPath(item.url) : item.url;
-                                const buf = readFileSync(src);
-                                const ext = path.extname(item.url).toLowerCase();
-                                const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
-                                imageData = `${mime};base64,${buf.toString('base64')}`;
-                            } catch (e) {
-                                console.warn(`Failed to read background image source ${item.url}; falling back to screenshot.`, e);
-                            }
+                        // Any image with a recoverable source (marp background figures
+                        // AND plain <img> content images) embeds the ORIGINAL file at
+                        // full resolution, so resizing in PowerPoint never pixelates.
+                        // Vector sources, unreachable files and kroki embeds fall
+                        // through to the 2x-resolution DOM screenshot.
+                        const imageData = item.url ? await readImageSource(item.url) : undefined;
+                        if (imageData) {
+                            slide.addImage({
+                                data: imageData,
+                                x: pxToIn(item.x),
+                                y: pxToIn(item.y),
+                                w: pxToIn(item.w),
+                                h: pxToIn(item.h),
+                            });
+                        } else {
+                            await screenshotAsImage(slide, item);
                         }
-                        if (!imageData) {
-                            const el = await page.$(`[data-export-id="${item.id}"]`);
-                            if (!el) continue;
-                            const shot = await el.screenshot({ type: 'png' });
-                            imageData = `image/png;base64,${Buffer.from(shot).toString('base64')}`;
-                        }
-                        slide.addImage({
-                            data: imageData,
-                            x: pxToIn(item.x),
-                            y: pxToIn(item.y),
-                            w: pxToIn(item.w),
-                            h: pxToIn(item.h),
-                        });
                     }
                 }
             }
